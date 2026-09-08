@@ -525,63 +525,41 @@ class PDFDocumentModel:
             center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
             morph = (center, fitz.Matrix(rotation)) if is_rotated else None
 
+            s = page.new_shape()
             if should_draw_box:
-                if is_rotated:
-                    s = page.new_shape()
-                    s.draw_rect(rect, radius=r_val)
-                    s.finish(
-                        color=stroke_color if (stroke_color and stroke_width > 0) else None,
-                        fill=fill_color,
-                        fill_opacity=fill_opacity,
-                        stroke_opacity=stroke_opacity,
-                        width=stroke_width,
-                        morph=morph
-                    )
-                    s.commit(overlay=overlay)
-                else:
-                    page.draw_rect(
-                        rect,
-                        color=stroke_color if (stroke_color and stroke_width > 0) else None,
-                        fill=fill_color,
-                        fill_opacity=fill_opacity,
-                        stroke_opacity=stroke_opacity,
-                        width=stroke_width,
-                        radius=r_val,
-                        overlay=overlay
-                    )
-
-            if shape.get("text"):
-                self._render_shape_text(page, shape, rect, overlay, morph=morph)
-
-        elif shape_type in ("circle", "oval"):
-            rect = fitz.Rect(geometry)
-            center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
-            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
-
-            if is_rotated:
-                s = page.new_shape()
-                s.draw_oval(rect)
+                s.draw_rect(rect, radius=r_val)
                 s.finish(
-                    color=stroke_color,
+                    color=stroke_color if (stroke_color and stroke_width > 0) else None,
                     fill=fill_color,
                     fill_opacity=fill_opacity,
                     stroke_opacity=stroke_opacity,
                     width=stroke_width,
                     morph=morph
                 )
-                s.commit(overlay=overlay)
-            else:
-                page.draw_oval(
-                    rect,
-                    color=stroke_color,
-                    fill=fill_color,
-                    fill_opacity=fill_opacity,
-                    stroke_opacity=stroke_opacity,
-                    width=stroke_width,
-                    overlay=overlay
-                )
+
             if shape.get("text"):
-                self._render_shape_text(page, shape, rect, overlay, morph=morph)
+                self._render_shape_text(page, shape, rect, overlay, morph=morph, shape_obj=s)
+
+            s.commit(overlay=overlay)
+
+        elif shape_type in ("circle", "oval"):
+            rect = fitz.Rect(geometry)
+            center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
+
+            s = page.new_shape()
+            s.draw_oval(rect)
+            s.finish(
+                color=stroke_color if (stroke_color and stroke_width > 0) else None,
+                fill=fill_color,
+                fill_opacity=fill_opacity,
+                stroke_opacity=stroke_opacity,
+                width=stroke_width,
+                morph=morph
+            )
+            if shape.get("text"):
+                self._render_shape_text(page, shape, rect, overlay, morph=morph, shape_obj=s)
+            s.commit(overlay=overlay)
 
         elif shape_type == "arrow":
             p1, p2 = geometry
@@ -597,45 +575,38 @@ class PDFDocumentModel:
                 head_angle = 0.45
                 w1 = (p2[0] - head_len * math.cos(angle - head_angle), p2[1] - head_len * math.sin(angle - head_angle))
                 w2 = (p2[0] - head_len * math.cos(angle + head_angle), p2[1] - head_len * math.sin(angle + head_angle))
-                if is_rotated:
-                    s = page.new_shape()
-                    s.draw_line(p1, p2)
-                    s.finish(color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, morph=morph)
-                    s.draw_polyline([w1, p2, w2, w1])
-                    s.finish(
-                        color=stroke_color,
-                        fill=stroke_color,
-                        width=max(0.5, stroke_width * 0.5),
-                        fill_opacity=fill_opacity if fill_color else stroke_opacity,
-                        stroke_opacity=stroke_opacity,
-                        morph=morph
-                    )
-                    s.commit(overlay=overlay)
-                else:
-                    page.draw_line(p1, p2, color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, overlay=overlay)
-                    page.draw_polyline(
-                        [w1, p2, w2, w1],
-                        color=stroke_color,
-                        fill=stroke_color,
-                        width=max(0.5, stroke_width * 0.5),
-                        fill_opacity=fill_opacity if fill_color else stroke_opacity,
-                        stroke_opacity=stroke_opacity,
-                        overlay=overlay
-                    )
+                s = page.new_shape()
+                s.draw_line(p1, p2)
+                s.finish(color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, morph=morph)
+                s.draw_polyline([w1, p2, w2, w1])
+                s.finish(
+                    color=stroke_color,
+                    fill=stroke_color,
+                    width=max(0.5, stroke_width * 0.5),
+                    fill_opacity=fill_opacity if fill_color else stroke_opacity,
+                    stroke_opacity=stroke_opacity,
+                    morph=morph
+                )
+                s.commit(overlay=overlay)
 
         elif shape_type == "line":
             p1, p2 = geometry
             center = fitz.Point((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
             morph = (center, fitz.Matrix(rotation)) if is_rotated else None
-            if is_rotated:
-                s = page.new_shape()
-                s.draw_line(p1, p2)
-                s.finish(color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, morph=morph)
-                s.commit(overlay=overlay)
-            else:
-                page.draw_line(p1, p2, color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, overlay=overlay)
+            s = page.new_shape()
+            s.draw_line(p1, p2)
+            s.finish(color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, morph=morph)
+            s.commit(overlay=overlay)
 
-    def _render_shape_text(self, page: fitz.Page, shape: Dict[str, Any], rect: fitz.Rect, overlay: bool = True, morph: Optional[Tuple[fitz.Point, fitz.Matrix]] = None):
+    def _render_shape_text(
+        self,
+        page: fitz.Page,
+        shape: Dict[str, Any],
+        rect: fitz.Rect,
+        overlay: bool = True,
+        morph: Optional[Tuple[fitz.Point, fitz.Matrix]] = None,
+        shape_obj: Optional[fitz.Shape] = None
+    ):
         """Renderöi muodon tai tekstilaatikon sisäisen tekstin PyMuPDF-sivulle."""
         text = str(shape.get("text", "")).strip()
         if not text:
@@ -694,7 +665,8 @@ class PDFDocumentModel:
                 f_path, f_fam = FontconfigResolver.resolve_local_font(font_family, font_bold, font_italic)
                 if f_path and os.path.exists(f_path):
                     fontfile = f_path
-                    fontname = f_fam or font_family
+                    clean_name = re.sub(r'[^a-zA-Z0-9_-]', '', f_fam or font_family)
+                    fontname = clean_name if clean_name else "customfont"
                 else:
                     fontname = "hebo" if font_bold else "helv"
             except Exception:
@@ -725,32 +697,58 @@ class PDFDocumentModel:
             except Exception:
                 pass
 
-        try:
-            page.insert_textbox(
-                inner_rect,
-                text,
-                fontsize=font_size,
-                fontname=fontname,
-                fontfile=fontfile,
-                color=text_color,
-                align=align_code,
-                overlay=overlay,
-                morph=morph
-            )
-        except Exception:
+        if shape_obj is not None:
+            try:
+                shape_obj.insert_textbox(
+                    inner_rect,
+                    text,
+                    fontsize=font_size,
+                    fontname=fontname,
+                    fontfile=fontfile,
+                    color=text_color,
+                    align=align_code,
+                    morph=morph
+                )
+            except Exception:
+                try:
+                    shape_obj.insert_textbox(
+                        inner_rect,
+                        text,
+                        fontsize=font_size,
+                        fontname="helv",
+                        color=text_color,
+                        align=align_code,
+                        morph=morph
+                    )
+                except Exception:
+                    pass
+        else:
             try:
                 page.insert_textbox(
                     inner_rect,
                     text,
                     fontsize=font_size,
-                    fontname="helv",
+                    fontname=fontname,
+                    fontfile=fontfile,
                     color=text_color,
                     align=align_code,
                     overlay=overlay,
                     morph=morph
                 )
             except Exception:
-                pass
+                try:
+                    page.insert_textbox(
+                        inner_rect,
+                        text,
+                        fontsize=font_size,
+                        fontname="helv",
+                        color=text_color,
+                        align=align_code,
+                        overlay=overlay,
+                        morph=morph
+                    )
+                except Exception:
+                    pass
 
     def reconstruct_page_shapes(self, page_idx: int):
         """

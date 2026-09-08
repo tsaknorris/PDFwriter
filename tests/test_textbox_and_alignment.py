@@ -276,6 +276,70 @@ class TestTextboxAndAlignment(unittest.TestCase):
         self.assertEqual(model.get_shape(0, s_id)["text"], "Muokattu teksti")
         self.assertIn("Muokattu teksti", model.doc[0].get_text())
 
+    def test_textbox_text_color_rendering_and_overlay(self):
+        """Varmistaa että tekstilaatikon tekstiväri renderöityy aina taustavärin eteen eikä peity."""
+        model = PDFDocumentModel()
+        model.open(self.doc_path)
+
+        canvas = PDFPageCanvas()
+        canvas.set_document(model)
+        dock = ShapePropertiesDock()
+        canvas.shape_selected.connect(dock.load_shape_properties)
+        dock.properties_changed.connect(canvas.set_shape_properties)
+
+        # 1. Luodaan tekstilaatikko vaalealla taustalla ja mustalla tekstillä (overlay=False)
+        s_id = model.draw_shape(
+            page_idx=0,
+            shape_type="textbox",
+            geometry=(50, 150, 350, 300),
+            text="Plaaplaaplaa",
+            font_family="Helvetica",
+            font_size=24.0,
+            text_color=(0.0, 0.0, 0.0),
+            fill_color=(0.8, 0.9, 0.9),
+            fill_opacity=0.85,
+            overlay=False
+        )
+
+        model.reconstruct_page_shapes(0)
+        pix = model.doc[0].get_pixmap()
+
+        # Varmistetaan että sivulta löytyy aitoja mustia tekstipikseleitä (teksti ei ole peittynyt)
+        found_black_text = False
+        for y in range(150, 300):
+            for x in range(50, 350):
+                p = pix.pixel(x, y)
+                if p[0] < 50 and p[1] < 50 and p[2] < 50:
+                    found_black_text = True
+                    break
+            if found_black_text:
+                break
+        self.assertTrue(found_black_text, "Tekstin pikselit eivät saa peittyä taustan alle!")
+
+        # 2. Valitaan muoto kankaalla ja muutetaan tekstin väri punaiseksi
+        canvas.select_shape(s_id)
+        self.assertEqual(dock.selected_shape_id, s_id)
+
+        dock.text_color_rgb = (1.0, 0.0, 0.0)
+        dock._update_color_buttons()
+        dock._emit_properties(commit_undo=True)
+
+        updated = model.get_shape(0, s_id)
+        self.assertEqual(updated["text_color"], (1.0, 0.0, 0.0))
+
+        # Tarkistetaan että punainen teksti renderöityi sivulle
+        pix2 = model.doc[0].get_pixmap()
+        found_red_text = False
+        for y in range(150, 300):
+            for x in range(50, 350):
+                p = pix2.pixel(x, y)
+                if p[0] > 200 and p[1] < 50 and p[2] < 50:
+                    found_red_text = True
+                    break
+            if found_red_text:
+                break
+        self.assertTrue(found_red_text, "Tekstin tulee päivittyä punaiseksi sivun pixmapissa!")
+
 
 if __name__ == "__main__":
     unittest.main()

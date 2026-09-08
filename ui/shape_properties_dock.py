@@ -424,7 +424,14 @@ class ShapePropertiesDock(QWidget):
                 btn.setChecked(False)
                 btn.setStyleSheet("text-align: left; padding: 4px 8px; font-weight: normal; background-color: #2a2a34; color: #f8fafc; border: 1px solid #4a4a58; border-radius: 3px;")
 
+        if match_id == "textbox" and self.selected_shape_id is None:
+            self.overlay = True
+            self.rb_over.setChecked(True)
+            self.default_props["overlay"] = True
+
         self.tool_changed.emit(self.active_tool)
+        if self.selected_shape_id is None:
+            self._emit_properties(commit_undo=False)
 
     def set_tool(self, tool_id: str):
         """Asettaa työkalun ohjelmallisesti."""

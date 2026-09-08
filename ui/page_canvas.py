@@ -164,6 +164,22 @@ class PDFPageCanvas(QWidget):
         self._active_inline_shape_id: Optional[str] = None
         self._syncing_inline_editor: bool = False
 
+    def _update_inline_shape_editor_style(self, shape: Dict[str, Any]):
+        """Päivittää in-canvas editorin värit ja kirjasinkoon muodon asetuksia vastaavaksi."""
+        tc = shape.get("text_color", (0.0, 0.0, 0.0))
+        tr, tg, tb = int(tc[0] * 255), int(tc[1] * 255), int(tc[2] * 255)
+        hex_text = f"#{tr:02x}{tg:02x}{tb:02x}"
+        fc = shape.get("fill_color")
+        if fc:
+            fr, fg, fb = int(fc[0] * 255), int(fc[1] * 255), int(fc[2] * 255)
+            bg_css = f"rgba({fr}, {fg}, {fb}, 0.95)"
+        else:
+            bg_css = "#ffffff" if (tr + tg + tb) < 380 else "#1e1e24"
+        fs = max(10, int(shape.get("font_size", 14.0) * self.zoom_factor * 0.9))
+        self.inline_shape_editor.setStyleSheet(
+            f"background-color: {bg_css}; color: {hex_text}; border: 2px solid #0284c7; border-radius: 4px; padding: 4px; font-size: {fs}px;"
+        )
+
     def start_inline_shape_editor(self, shape_id: str):
         """Käynnistää kankaalla kelluvan tekstieditorin suoraan muodon päällä."""
         if not self.doc_model or not shape_id:
@@ -182,6 +198,7 @@ class PDFPageCanvas(QWidget):
         try:
             self.inline_shape_editor.setGeometry(int(x), int(y), int(w), int(h))
             self.inline_shape_editor.setPlainText(shape.get("text", ""))
+            self._update_inline_shape_editor_style(shape)
         finally:
             self._syncing_inline_editor = False
 
@@ -505,8 +522,11 @@ class PDFPageCanvas(QWidget):
                     self.refresh_page()
                     self.shape_properties_committed.emit()
 
-                    # Jos kelluva in-canvas editori on auki tälle muodolle, synkronoidaan sen teksti säilyttäen kursori
+                    # Jos kelluva in-canvas editori on auki tälle muodolle, synkronoidaan sen teksti säilyttäen kursori ja päivitetään tyyli
                     if self.inline_shape_editor.isVisible() and self._active_inline_shape_id == target_id:
+                        cur_up = self.doc_model.get_shape(self.current_page_idx, target_id)
+                        if cur_up:
+                            self._update_inline_shape_editor_style(cur_up)
                         if "text" in props and not self._syncing_inline_editor:
                             new_t = props["text"]
                             if self.inline_shape_editor.toPlainText() != new_t:
@@ -1142,6 +1162,9 @@ class PDFPageCanvas(QWidget):
                 dy = abs(p2[1] - p1[1])
                 if (dx > 3 or dy > 3) and self.doc_model and self.doc_model.is_open:
                     drawn_tool = self.active_tool
+                    actual_overlay = self.shape_overlay
+                    if drawn_tool == "textbox" and not self.shape_overlay:
+                        actual_overlay = True
                     if drawn_tool in ("rect", "rounded_rect", "circle", "textbox"):
                         geom = (min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1]))
                     else:
@@ -1157,7 +1180,7 @@ class PDFPageCanvas(QWidget):
                         stroke_opacity=self.shape_stroke_opacity,
                         stroke_width=self.shape_stroke_width,
                         radius=self.shape_radius,
-                        overlay=self.shape_overlay,
+                        overlay=actual_overlay,
                         rotation=getattr(self, 'shape_rotation', 0.0),
                         text=getattr(self, 'shape_text', ""),
                         font_family=getattr(self, 'shape_font_family', "Helvetica"),

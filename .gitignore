@@ -1,0 +1,32 @@
+cat << 'EOF' > .gitignore
+# Python väliaikaistiedostot ja käännökset
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtuaaliympäristöt
+.venv/
+venv/
+ENV/
+env/
+
+# Ympäristömuuttujat ja salaisuudet
+.env
+.env.local
+
+# IDE- ja editoriasetukset
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Työkalujen välimuistit ja lokit
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+
+# Nix- ja direnv-tiedostot (jos käytössä)
+.direnv/
+result
+EOF

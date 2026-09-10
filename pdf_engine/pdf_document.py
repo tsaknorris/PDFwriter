@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import fitz
 from PyQt6.QtGui import QImage
 
-from .font_resolver import FontconfigResolver, FontMatchResult, FontDownloader
+from .font_resolver import FontconfigResolver, FontMatchResult, FontDownloader, LOCAL_FONTS_DIR
 from .layout_engine import LayoutEngine, FitStrategy, OverflowReport
 
 
@@ -86,8 +86,11 @@ class PDFDocumentModel:
         self.operations_history.clear()
         self.page_shapes.clear()
         self._next_shape_id = 1
-        self._next_group_id = 1
         self._push_undo_state()
+        try:
+            self.extract_document_fonts()
+        except Exception:
+            pass
 
     def close(self):
         """Sulkee avoimen dokumentin ja vapauttaa resurssit."""
@@ -189,10 +192,20 @@ class PDFDocumentModel:
         if from_idx == to_idx:
             return
         if 0 <= from_idx < self.page_count and 0 <= to_idx < self.page_count:
+            self._ensure_base_doc()
             layout = list(range(self.page_count))
             p = layout.pop(from_idx)
             layout.insert(to_idx, p)
             self.doc.select(layout)
+            if self.base_doc and not self.base_doc.is_closed:
+                self.base_doc.select(layout)
+
+            new_page_shapes = {}
+            for new_idx, old_idx in enumerate(layout):
+                if old_idx in self.page_shapes:
+                    new_page_shapes[new_idx] = self.page_shapes[old_idx]
+            self.page_shapes = new_page_shapes
+
             self._push_undo_state()
             self.redo_stack.clear()
 
@@ -210,9 +223,21 @@ class PDFDocumentModel:
             src_doc.close()
             return 0
 
+        self._ensure_base_doc()
         start_at = at_idx if 0 <= at_idx <= self.page_count else -1
         self.doc.insert_pdf(src_doc, from_page=from_page, to_page=to_page, start_at=start_at)
+        if self.base_doc and not self.base_doc.is_closed:
+            self.base_doc.insert_pdf(src_doc, from_page=from_page, to_page=to_page, start_at=start_at)
         src_doc.close()
+
+        actual_insert_idx = start_at if start_at >= 0 else (self.page_count - src_count)
+        new_page_shapes = {}
+        for p_idx, shapes in self.page_shapes.items():
+            if p_idx >= actual_insert_idx:
+                new_page_shapes[p_idx + src_count] = shapes
+            else:
+                new_page_shapes[p_idx] = shapes
+        self.page_shapes = new_page_shapes
 
         self._push_undo_state()
         self.redo_stack.clear()
@@ -222,8 +247,21 @@ class PDFDocumentModel:
         """Lisää uuden tyhjän sivun kohtaan at_idx."""
         if not self.is_open:
             return
+        self._ensure_base_doc()
         pno = at_idx if 0 <= at_idx <= self.page_count else -1
         self.doc.new_page(pno=pno, width=width, height=height)
+        if self.base_doc and not self.base_doc.is_closed:
+            self.base_doc.new_page(pno=pno, width=width, height=height)
+
+        target_pno = pno if pno >= 0 else (self.page_count - 1)
+        new_page_shapes = {}
+        for p_idx, shapes in self.page_shapes.items():
+            if p_idx >= target_pno:
+                new_page_shapes[p_idx + 1] = shapes
+            else:
+                new_page_shapes[p_idx] = shapes
+        self.page_shapes = new_page_shapes
+
         self._push_undo_state()
         self.redo_stack.clear()
 
@@ -633,43 +671,48 @@ class PDFDocumentModel:
         fontname = "helv"
         fontfile = None
 
-        if "time" in fam_lower or "roman" in fam_lower or "serif" in fam_lower:
-            if font_bold and font_italic:
-                fontname = "tibi"
-            elif font_bold:
-                fontname = "tibo"
-            elif font_italic:
-                fontname = "tiit"
-            else:
-                fontname = "times"
-        elif "courier" in fam_lower or "mono" in fam_lower:
-            if font_bold and font_italic:
-                fontname = "cobi"
-            elif font_bold:
-                fontname = "cobo"
-            elif font_italic:
-                fontname = "coit"
-            else:
-                fontname = "cour"
-        elif "helv" in fam_lower or "arial" in fam_lower or "sans" in fam_lower:
-            if font_bold and font_italic:
-                fontname = "hebi"
-            elif font_bold:
-                fontname = "hebo"
-            elif font_italic:
-                fontname = "heit"
-            else:
-                fontname = "helv"
+        # 1. Ensisijaisesti etsitään todellinen fonttitiedosto (paikallinen, purettu dokumenttifontti tai avoin vastine)
+        f_path = None
+        f_fam = None
+        try:
+            f_path, f_fam = FontconfigResolver.resolve_local_font(font_family, font_bold, font_italic)
+        except Exception:
+            pass
+
+        if f_path and os.path.exists(f_path):
+            fontfile = f_path
+            clean_name = re.sub(r'[^a-zA-Z0-9_-]', '', f_fam or font_family)
+            fontname = clean_name if clean_name else "customfont"
         else:
-            try:
-                f_path, f_fam = FontconfigResolver.resolve_local_font(font_family, font_bold, font_italic)
-                if f_path and os.path.exists(f_path):
-                    fontfile = f_path
-                    clean_name = re.sub(r'[^a-zA-Z0-9_-]', '', f_fam or font_family)
-                    fontname = clean_name if clean_name else "customfont"
+            # 2. Toissijaisesti käytetään standardeja Base-14 PDF-fontteja
+            if "time" in fam_lower or "roman" in fam_lower or "serif" in fam_lower:
+                if font_bold and font_italic:
+                    fontname = "tibi"
+                elif font_bold:
+                    fontname = "tibo"
+                elif font_italic:
+                    fontname = "tiit"
                 else:
-                    fontname = "hebo" if font_bold else "helv"
-            except Exception:
+                    fontname = "times"
+            elif "courier" in fam_lower or "mono" in fam_lower:
+                if font_bold and font_italic:
+                    fontname = "cobi"
+                elif font_bold:
+                    fontname = "cobo"
+                elif font_italic:
+                    fontname = "coit"
+                else:
+                    fontname = "cour"
+            elif "helv" in fam_lower or "arial" in fam_lower or "sans" in fam_lower:
+                if font_bold and font_italic:
+                    fontname = "hebi"
+                elif font_bold:
+                    fontname = "hebo"
+                elif font_italic:
+                    fontname = "heit"
+                else:
+                    fontname = "helv"
+            else:
                 fontname = "hebo" if font_bold else "helv"
 
         inner_rect = fitz.Rect(rect.x0 + pad, rect.y0 + pad, rect.x1 - pad, rect.y1 - pad)
@@ -2009,3 +2052,86 @@ class PDFDocumentModel:
         # Järjestetään: ensin puuttuvat, sitten osajoukot, sitten asennetut
         result.sort(key=lambda x: (x["is_installed"], not x["is_subset"], x["clean_family"]))
         return result
+
+    def get_document_font_families(self) -> List[str]:
+        """
+        Palauttaa listan uniikeista kirjasinperheistä, joita käytetään nykyisessä dokumentissa.
+        Puhdistaa leikkaukset ja osajoukkoetuliitteet (esim. 'MinionPro', 'Stone Serif Std').
+        """
+        if not self.is_open or not self.doc:
+            return []
+
+        families = []
+        seen = set()
+
+        for pno in range(self.page_count):
+            page = self.doc[pno]
+            for f in page.get_fonts(full=True):
+                fbase = f[3]
+                clean_fam, _, _, _ = FontconfigResolver.clean_font_name(fbase)
+                if clean_fam and clean_fam.lower() not in seen:
+                    seen.add(clean_fam.lower())
+                    families.append(clean_fam)
+
+        return sorted(families, key=lambda s: s.lower())
+
+    def extract_document_fonts(self) -> List[str]:
+        """
+        Purkaa dokumentin upotetut fontit (TTF/OTF) sovelluksen fonts/extracted/ -hakemistoon,
+        jotta ne ovat heti käytettävissä uusille tekstilaatikoille ja sivuille.
+        Palauttaa listan tallennettujen fonttitiedostojen poluista.
+        """
+        if not self.is_open or not self.doc:
+            return []
+
+        extracted_dir = os.path.join(LOCAL_FONTS_DIR, "extracted")
+        os.makedirs(extracted_dir, exist_ok=True)
+        saved_paths = []
+        extracted_xrefs = set()
+
+        for pno in range(self.page_count):
+            page = self.doc[pno]
+            for f in page.get_fonts(full=True):
+                fxref, fext, ftype, fbase, fname, fenc = f[:6]
+                if fxref in extracted_xrefs or fxref <= 0:
+                    continue
+                extracted_xrefs.add(fxref)
+
+                try:
+                    res = self.doc.extract_font(fxref)
+                    bname, ext, f_type, buf = FontconfigResolver._parse_extracted_font(res)
+                    if not buf or len(buf) < 100:
+                        continue
+
+                    ext_clean = (ext or fext or "ttf").lower()
+                    if ext_clean not in ("ttf", "otf"):
+                        if buf.startswith(b"OTTO"):
+                            ext_clean = "otf"
+                        elif buf.startswith(b"\x00\x01\x00\x00") or buf.startswith(b"true"):
+                            ext_clean = "ttf"
+                        else:
+                            continue
+
+                    clean_fam, is_sub, is_b, is_it = FontconfigResolver.clean_font_name(fbase or bname)
+                    safe_stem = re.sub(r'[^a-zA-Z0-9_-]', '', clean_fam)
+                    if not safe_stem:
+                        safe_stem = "docfont"
+                    style_suffix = ""
+                    if is_b and is_it:
+                        style_suffix = "-BoldItalic"
+                    elif is_b:
+                        style_suffix = "-Bold"
+                    elif is_it:
+                        style_suffix = "-Italic"
+
+                    filename = f"{safe_stem}{style_suffix}.{ext_clean}"
+                    out_path = os.path.join(extracted_dir, filename)
+                    with open(out_path, "wb") as f_out:
+                        f_out.write(buf)
+                    saved_paths.append(out_path)
+                except Exception:
+                    pass
+
+        if saved_paths:
+            FontconfigResolver.scan_local_user_fonts(force_reload=True)
+        return saved_paths

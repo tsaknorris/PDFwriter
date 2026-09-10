@@ -1,4 +1,3 @@
-cat << 'EOF' > .gitignore
 # Python väliaikaistiedostot ja käännökset
 __pycache__/
 *.py[cod]
@@ -29,4 +28,6 @@ env/
 # Nix- ja direnv-tiedostot (jos käytössä)
 .direnv/
 result
-EOF
+
+# Puretut dokumenttifontit (luodaan ajonaikaisesti)
+fonts/extracted/

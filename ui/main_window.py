@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         self.shape_widget.properties_changed.connect(self.canvas.set_shape_properties)
         self.shape_widget.add_background_to_selection_requested.connect(self.canvas.add_background_card_to_selected_block)
         self.shape_widget.delete_shape_requested.connect(self.canvas.delete_selected_shape)
+        self.shape_widget.font_manager_requested.connect(self.show_font_manager_dialog)
         self.canvas.shape_selected.connect(self._on_shape_selected)
         self.canvas.tool_switched.connect(self.shape_widget.set_tool)
         self.canvas.request_focus_shape_text.connect(self._on_request_focus_shape_text)
@@ -569,6 +570,8 @@ class MainWindow(QMainWindow):
             self.inspector_widget.update_document_details(self.doc_model)
             self.update_action_states()
             self._check_document_fonts()
+            if hasattr(self, "shape_widget") and self.shape_widget:
+                self.shape_widget.update_available_fonts(self.doc_model.get_document_font_families())
             self.status_bar.showMessage(f"Avattu onnistuneesti: {file_path}", 4000)
         except Exception as e:
             QMessageBox.critical(self, "Virhe tiedoston avauksessa", f"Ei voitu avata PDF-tiedostoa:\n{str(e)}")
@@ -713,6 +716,9 @@ class MainWindow(QMainWindow):
             self.editor_widget.set_target_block(self.current_block, self.doc_model)
         elif self.current_span:
             self.editor_widget.set_target_span(self.current_span, self.doc_model)
+        if hasattr(self, "shape_widget") and self.shape_widget:
+            doc_fonts = self.doc_model.get_document_font_families() if self.doc_model.is_open else []
+            self.shape_widget.update_available_fonts(doc_fonts)
 
     def open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Valitse PDF-tiedosto", "", "PDF-tiedostot (*.pdf)")

@@ -5,15 +5,16 @@ tason määrityksen (tekstin alle vs. tekstin päälle), värit, läpinäkyvyyde
 sekä objektin sisäisen tekstin ja typografian (tasaus, fontti, koko, leikkaukset, väri).
 """
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import math
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QColorDialog, QDoubleSpinBox, QSlider, QRadioButton, QButtonGroup,
     QGroupBox, QCheckBox, QFrame, QPlainTextEdit, QComboBox, QScrollArea
 )
+from pdf_engine.font_resolver import FontconfigResolver
 
 
 class ShapePropertiesDock(QWidget):
@@ -23,6 +24,7 @@ class ShapePropertiesDock(QWidget):
     properties_changed = pyqtSignal(dict)
     add_background_to_selection_requested = pyqtSignal()
     delete_shape_requested = pyqtSignal()
+    font_manager_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -44,6 +46,7 @@ class ShapePropertiesDock(QWidget):
         # Teksti ja typografia
         self.shape_text: str = ""
         self.font_family: str = "Helvetica"
+        self._doc_fonts: List[str] = []
         self.font_size: float = 14.0
         self.font_bold: bool = False
         self.font_italic: bool = False
@@ -159,10 +162,16 @@ class ShapePropertiesDock(QWidget):
         font_row.addWidget(QLabel("Fontti:"))
         self.combo_font_family = QComboBox()
         self.combo_font_family.setEditable(True)
-        for ff in ["Helvetica", "Times New Roman", "Courier", "Arial", "DejaVu Sans", "Liberation Sans"]:
-            self.combo_font_family.addItem(ff)
+        self.update_available_fonts()
         self.combo_font_family.currentTextChanged.connect(self._on_font_family_changed)
         font_row.addWidget(self.combo_font_family, 2)
+
+        self.btn_manage_fonts = QPushButton("🔤")
+        self.btn_manage_fonts.setToolTip("Avaa kirjasinhallinta ja tutki dokumentin fontteja...")
+        self.btn_manage_fonts.setFixedWidth(28)
+        self.btn_manage_fonts.setStyleSheet("font-size: 13px; padding: 2px;")
+        self.btn_manage_fonts.clicked.connect(self.font_manager_requested.emit)
+        font_row.addWidget(self.btn_manage_fonts)
 
         font_row.addWidget(QLabel("Koko:"))
         self.spin_font_size = QDoubleSpinBox()
@@ -535,6 +544,73 @@ class ShapePropertiesDock(QWidget):
 
         self._update_color_buttons()
 
+    def update_available_fonts(self, doc_fonts: Optional[List[str]] = None):
+        """
+        Päivittää fonttivalikon sisällön:
+        1. Dokumentin omat kirjasimet ryhmiteltynä ylös
+        2. Standardikirjasimet ja asennetut paikalliset kirjasimet alas
+        Säilyttää käyttäjän nykyisen valinnan tai valitsee dokumentin ensisijaisen fontin.
+        """
+        if doc_fonts is not None:
+            self._doc_fonts = [f.strip() for f in doc_fonts if f and f.strip()]
+        elif not hasattr(self, "_doc_fonts"):
+            self._doc_fonts = []
+
+        current_selection = self.combo_font_family.currentText().strip() if hasattr(self, "combo_font_family") else ""
+        if hasattr(self, "combo_font_family"):
+            self.combo_font_family.blockSignals(True)
+
+        model = QStandardItemModel()
+
+        # 1. Dokumentin fontit
+        if self._doc_fonts:
+            h1 = QStandardItem("── Dokumentin fontit ──")
+            h1.setEnabled(False)
+            h1.setForeground(QColor("#94a3b8"))
+            model.appendRow(h1)
+
+            for f in self._doc_fonts:
+                it = QStandardItem(f)
+                model.appendRow(it)
+
+        # 2. Standardi- ja järjestelmäfontit
+        h2 = QStandardItem("── Standardikirjasimet ──")
+        h2.setEnabled(False)
+        h2.setForeground(QColor("#94a3b8"))
+        model.appendRow(h2)
+
+        standard_list = ["Helvetica", "Times New Roman", "Courier", "Arial", "Liberation Sans", "DejaVu Sans"]
+
+        # Haetaan lisäksi lokaalit asennetut/puretut käyttäjäfontit
+        try:
+            user_fonts = FontconfigResolver.scan_local_user_fonts()
+            for flist in user_fonts.values():
+                for item in flist:
+                    fam = item.get("clean_family")
+                    if fam and fam not in standard_list and fam not in self._doc_fonts:
+                        standard_list.append(fam)
+        except Exception:
+            pass
+
+        for f in standard_list:
+            it = QStandardItem(f)
+            model.appendRow(it)
+
+        if hasattr(self, "combo_font_family"):
+            self.combo_font_family.setModel(model)
+
+            target = current_selection or self.font_family
+            if not target or target.startswith("──"):
+                target = self._doc_fonts[0] if self._doc_fonts else "Helvetica"
+
+            idx = self.combo_font_family.findText(target)
+            if idx >= 0:
+                self.combo_font_family.setCurrentIndex(idx)
+            else:
+                self.combo_font_family.setEditText(target)
+
+            self.combo_font_family.blockSignals(False)
+
     def load_shape_properties(self, shape_data: Optional[Dict[str, Any]]):
         """Lataa valitun muodon ominaisuudet säätimiin reaaliaikaista editointia varten."""
         self._loading_properties = True
@@ -665,8 +741,11 @@ class ShapePropertiesDock(QWidget):
     def _on_font_family_changed(self, text: str):
         if self._loading_properties:
             return
-        self.font_family = text
-        self.default_props["font_family"] = text
+        clean_text = (text or "").strip()
+        if not clean_text or clean_text.startswith("──") or clean_text.startswith("---"):
+            return
+        self.font_family = clean_text
+        self.default_props["font_family"] = clean_text
         self._emit_properties(commit_undo=True)
 
     def _on_font_size_changed(self, val: float):

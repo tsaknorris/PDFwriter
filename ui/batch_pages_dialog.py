@@ -353,10 +353,21 @@ class BatchPageOperationsDialog(QDialog):
 
         n = len(self.selected_indices)
         if n >= self.max_pages:
-            QMessageBox.warning(
-                self, "Toiminto estetty",
-                "Et voi poistaa kaikkia sivuja. Dokumenttiin täytyy jäädä vähintään 1 sivu."
+            ret = QMessageBox.question(
+                self, "Tyhjennä ja luo uusi sivu",
+                "PDF-dokumentissa on oltava vähintään yksi sivu.<br><br>"
+                "Haluatko tyhjentää dokumentin korvaamalla kaikki sivut uudella puhtaalla sivulla?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
+            if ret == QMessageBox.StandardButton.Yes:
+                self.doc_model.insert_blank_page(self.max_pages)
+                self.doc_model.delete_pages(list(range(self.max_pages)))
+                self.max_pages = self.doc_model.page_count
+                self.lbl_total_pages.setText(f"Dokumentissa sivuja: <b>{self.max_pages}</b>")
+                self.spin_move_target.setRange(1, max(1, self.max_pages))
+                self.pages_modified.emit(0)
+                self.txt_range.setText("1")
+                self._on_range_text_changed("1")
             return
 
         formatted = format_page_range_string(self.selected_indices)

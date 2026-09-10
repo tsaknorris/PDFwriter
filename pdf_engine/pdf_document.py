@@ -54,6 +54,7 @@ class PDFDocumentModel:
         self.redo_stack: List[Any] = []
         self.operations_history: List[EditOperation] = []
         self.page_shapes: Dict[int, List[Dict[str, Any]]] = {}
+        self.active_editing_shape_id: Optional[str] = None
         self._next_shape_id: int = 1
         self._next_group_id: int = 1
 
@@ -561,7 +562,7 @@ class PDFDocumentModel:
                 should_draw_box = False
 
             center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
-            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
+            morph = (center, fitz.Matrix(-rotation)) if is_rotated else None
 
             s = page.new_shape()
             if should_draw_box:
@@ -575,15 +576,19 @@ class PDFDocumentModel:
                     morph=morph
                 )
 
-            if shape.get("text"):
+            has_html = bool(shape.get("html") and str(shape.get("html")).strip())
+            if not has_html and shape.get("text"):
                 self._render_shape_text(page, shape, rect, overlay, morph=morph, shape_obj=s)
 
             s.commit(overlay=overlay)
 
+            if has_html:
+                self._render_shape_text(page, shape, rect, overlay=True if should_draw_box else overlay, morph=morph)
+
         elif shape_type in ("circle", "oval"):
             rect = fitz.Rect(geometry)
             center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
-            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
+            morph = (center, fitz.Matrix(-rotation)) if is_rotated else None
 
             s = page.new_shape()
             s.draw_oval(rect)
@@ -595,14 +600,20 @@ class PDFDocumentModel:
                 width=stroke_width,
                 morph=morph
             )
-            if shape.get("text"):
+
+            has_html = bool(shape.get("html") and str(shape.get("html")).strip())
+            if not has_html and shape.get("text"):
                 self._render_shape_text(page, shape, rect, overlay, morph=morph, shape_obj=s)
+
             s.commit(overlay=overlay)
+
+            if has_html:
+                self._render_shape_text(page, shape, rect, overlay=True, morph=morph)
 
         elif shape_type == "arrow":
             p1, p2 = geometry
             center = fitz.Point((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
+            morph = (center, fitz.Matrix(-rotation)) if is_rotated else None
 
             dx = p2[0] - p1[0]
             dy = p2[1] - p1[1]
@@ -630,7 +641,7 @@ class PDFDocumentModel:
         elif shape_type == "line":
             p1, p2 = geometry
             center = fitz.Point((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            morph = (center, fitz.Matrix(rotation)) if is_rotated else None
+            morph = (center, fitz.Matrix(-rotation)) if is_rotated else None
             s = page.new_shape()
             s.draw_line(p1, p2)
             s.finish(color=stroke_color, width=stroke_width, stroke_opacity=stroke_opacity, morph=morph)
@@ -718,6 +729,95 @@ class PDFDocumentModel:
         inner_rect = fitz.Rect(rect.x0 + pad, rect.y0 + pad, rect.x1 - pad, rect.y1 - pad)
         if inner_rect.width <= 5 or inner_rect.height <= 5:
             inner_rect = fitz.Rect(rect)
+
+        # Jos tämä muoto on parhaillaan aktiivisesti muokattavana kankaalla (InlineShapeEditor),
+        # ei piirretä sen tekstiä sivupixmapille haamukuvan/tuplatekstin välttämiseksi.
+        if getattr(self, "active_editing_shape_id", None) and shape.get("id") == self.active_editing_shape_id:
+            return
+
+        # Rikkaan tekstin (HTML / mixed fonts) renderöinti insert_htmlbox-moottorilla
+        html = shape.get("html")
+        if html and str(html).strip():
+            arch = None
+            try:
+                arch = fitz.Archive()
+                has_entries = False
+                if hasattr(self, "extracted_fonts_dir") and self.extracted_fonts_dir and os.path.exists(self.extracted_fonts_dir):
+                    arch.add(self.extracted_fonts_dir)
+                    has_entries = True
+                if LOCAL_FONTS_DIR and os.path.exists(LOCAL_FONTS_DIR):
+                    arch.add(LOCAL_FONTS_DIR)
+                    has_entries = True
+                if not has_entries:
+                    arch = None
+            except Exception:
+                arch = None
+
+            rotation = float(shape.get("rotation", 0.0))
+            is_rotated = abs(rotation) > 0.001
+            try:
+                if is_rotated:
+                    doc_temp = fitz.open()
+                    p_temp = doc_temp.new_page(width=max(10.0, inner_rect.width), height=max(10.0, inner_rect.height))
+                    spare, _ = p_temp.insert_htmlbox(
+                        fitz.Rect(0, 0, max(10.0, inner_rect.width), max(10.0, inner_rect.height)),
+                        html,
+                        archive=arch
+                    )
+                    y_off = 0.0
+                    if vertical_align == "middle" and spare > 0:
+                        y_off = spare / 2.0
+                    elif vertical_align == "bottom" and spare > 0:
+                        y_off = spare
+
+                    if y_off > 0:
+                        doc_temp.close()
+                        doc_temp = fitz.open()
+                        p_temp = doc_temp.new_page(width=max(10.0, inner_rect.width), height=max(10.0, inner_rect.height))
+                        p_temp.insert_htmlbox(
+                            fitz.Rect(0, y_off, max(10.0, inner_rect.width), max(10.0, inner_rect.height)),
+                            html,
+                            archive=arch
+                        )
+
+                    rad = math.radians(rotation)
+                    cos_a = abs(math.cos(rad))
+                    sin_a = abs(math.sin(rad))
+                    w = max(10.0, inner_rect.width)
+                    h = max(10.0, inner_rect.height)
+                    cx = (inner_rect.x0 + inner_rect.x1) / 2.0
+                    cy = (inner_rect.y0 + inner_rect.y1) / 2.0
+                    bbox_w = w * cos_a + h * sin_a
+                    bbox_h = w * sin_a + h * cos_a
+                    target_bbox = fitz.Rect(cx - bbox_w / 2.0, cy - bbox_h / 2.0, cx + bbox_w / 2.0, cy + bbox_h / 2.0)
+
+                    page.show_pdf_page(target_bbox, doc_temp, 0, rotate=-rotation, overlay=overlay)
+                    doc_temp.close()
+                    return
+                else:
+                    if vertical_align in ("middle", "bottom"):
+                        try:
+                            doc_temp = fitz.open()
+                            p_temp = doc_temp.new_page(width=max(10.0, inner_rect.width), height=max(10.0, inner_rect.height))
+                            spare, _ = p_temp.insert_htmlbox(
+                                fitz.Rect(0, 0, max(10.0, inner_rect.width), max(10.0, inner_rect.height)),
+                                html,
+                                archive=arch
+                            )
+                            doc_temp.close()
+                            if spare > 0:
+                                if vertical_align == "middle":
+                                    inner_rect.y0 += spare / 2.0
+                                elif vertical_align == "bottom":
+                                    inner_rect.y0 += spare
+                        except Exception:
+                            pass
+
+                    page.insert_htmlbox(inner_rect, html, archive=arch, overlay=overlay)
+                    return
+            except Exception:
+                # Jos HTML-renderöinti epäonnistuu, jatketaan puhtaan tekstin insert_textbox-polkuun
+                pass
 
         if vertical_align in ("middle", "bottom"):
             try:
@@ -844,7 +944,8 @@ class PDFDocumentModel:
         text_align: str = "center",
         vertical_align: str = "middle",
         text_padding: float = 4.0,
-        rotation: float = 0.0
+        rotation: float = 0.0,
+        html: Optional[str] = None
     ) -> str:
         """
         Piirtää sivulle graafisen muodon (suorakulmio, pyöristetty laatikko, ympyrä, nuoli, viiva tai tekstilaatikko)
@@ -896,7 +997,8 @@ class PDFDocumentModel:
             "text_align": text_align,
             "vertical_align": vertical_align,
             "text_padding": text_padding,
-            "rotation": float(rotation)
+            "rotation": float(rotation),
+            "html": html
         }
 
         if page_idx not in self.page_shapes:

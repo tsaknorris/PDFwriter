@@ -128,6 +128,34 @@ class TestRotationAndScrolling(unittest.TestCase):
         self.assertGreater(pix.width, 0)
         self.assertGreater(pix.height, 0)
 
+    def test_rotated_html_textbox_rendering_and_font_scale(self):
+        """Varmistaa että rikkaalla HTML-tekstillä varustettu tekstilaatikko kiertyy ilman fontin pienenemistä."""
+        html_content = (
+            "<p style='margin:0; text-align:center;'><span style='font-size:16pt;'>Rivi 1</span></p>"
+            "<p style='margin:0; text-align:center;'><span style='font-size:24pt; color:#ff0000;'>Rivi 2</span></p>"
+        )
+        shape_id = self.doc_model.draw_shape(
+            page_idx=0,
+            shape_type="textbox",
+            geometry=(100.0, 100.0, 300.0, 220.0),
+            fill_color=(1.0, 1.0, 1.0),
+            stroke_color=(0.1, 0.4, 0.8),
+            stroke_width=2.0,
+            text="Rivi 1\nRivi 2",
+            html=html_content,
+            rotation=30.0
+        )
+        self.assertIsNotNone(shape_id)
+        shape = self.doc_model.get_shape(0, shape_id)
+        self.assertEqual(shape.get("rotation"), 30.0)
+
+        # Renderöidään sivu
+        img, w, h = self.doc_model.render_page(0, scale=1.0)
+        self.assertFalse(img.isNull())
+        pix = self.doc_model.doc[0].get_pixmap()
+        self.assertGreater(pix.width, 0)
+        self.assertGreater(pix.height, 0)
+
     def test_prevent_backwards_typing_in_shape_dock(self):
         """
         Varmistaa, ettei tekstilaatikon tekstin muokkaus siirrä kursoria nollaan

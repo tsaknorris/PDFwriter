@@ -7,14 +7,65 @@ sekä objektin sisäisen tekstin ja typografian (tasaus, fontti, koko, leikkauks
 
 from typing import Optional, Tuple, Dict, Any, List
 import math
+import html
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem
+from PyQt6.QtGui import (
+    QColor, QStandardItemModel, QStandardItem, QTextCharFormat,
+    QFont, QTextBlockFormat, QTextCursor, QFontDatabase, QValidator
+)
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QColorDialog, QDoubleSpinBox, QSlider, QRadioButton, QButtonGroup,
-    QGroupBox, QCheckBox, QFrame, QPlainTextEdit, QComboBox, QScrollArea
+    QGroupBox, QCheckBox, QFrame, QPlainTextEdit, QTextEdit, QComboBox, QScrollArea,
+    QCompleter
 )
 from pdf_engine.font_resolver import FontconfigResolver
+
+
+class FontDoubleSpinBox(QDoubleSpinBox):
+    """
+    Käyttäjäystävällinen kirjasinkoon syöttöruutu:
+    - Hyväksyy desimaalierottimena sekä pisteen (.) että pilkun (,) lokaalista riippumatta.
+    - Näyttää kokonaisluvut puhtaasti (esim. '24 pt' eikä '24,00 pt').
+    - Ei koskaan hylkää tai palauta arvoa vanhaan vahingossa numeronäppäimistön tai pisteen vuoksi.
+    """
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setRange(4.0, 200.0)
+        self.setSingleStep(1.0)
+        self.setSuffix(" pt")
+        self.setDecimals(1)
+
+    def valueFromText(self, text: str) -> float:
+        clean = text.replace("pt", "").replace(" ", "").strip()
+        clean = clean.replace(",", ".")
+        try:
+            return float(clean)
+        except ValueError:
+            return self.value()
+
+    def textFromValue(self, val: float) -> str:
+        if abs(val - round(val)) < 0.05:
+            return f"{int(round(val))}"
+        return f"{val:.1f}"
+
+    def validate(self, input_text: str, pos: int):
+        clean = input_text.replace("pt", "").replace(" ", "").strip()
+        if not clean:
+            return (QValidator.State.Intermediate, input_text, pos)
+        test_str = clean.replace(",", ".")
+        try:
+            val = float(test_str)
+            if self.minimum() <= val <= self.maximum():
+                return (QValidator.State.Acceptable, input_text, pos)
+            elif val < self.minimum():
+                return (QValidator.State.Intermediate, input_text, pos)
+            else:
+                return (QValidator.State.Invalid, input_text, pos)
+        except ValueError:
+            if test_str.endswith(".") and test_str[:-1].isdigit():
+                return (QValidator.State.Intermediate, input_text, pos)
+            return (QValidator.State.Invalid, input_text, pos)
 
 
 class ShapePropertiesDock(QWidget):
@@ -25,12 +76,15 @@ class ShapePropertiesDock(QWidget):
     add_background_to_selection_requested = pyqtSignal()
     delete_shape_requested = pyqtSignal()
     font_manager_requested = pyqtSignal()
+    select_all_text_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.active_tool: str = "move"
         self.selected_shape_id: Optional[str] = None
         self._loading_properties: bool = False
+        self._syncing_controls: bool = False
+        self._formatting_in_progress: bool = False
 
         # Oletusvärit ja muoto-ominaisuudet
         self.has_fill: bool = True
@@ -45,6 +99,7 @@ class ShapePropertiesDock(QWidget):
 
         # Teksti ja typografia
         self.shape_text: str = ""
+        self.shape_html: Optional[str] = None
         self.font_family: str = "Helvetica"
         self._doc_fonts: List[str] = []
         self.font_size: float = 14.0
@@ -66,6 +121,7 @@ class ShapePropertiesDock(QWidget):
             "overlay": self.overlay,
             "rotation": self.rotation,
             "shape_text": self.shape_text,
+            "shape_html": self.shape_html,
             "font_family": self.font_family,
             "font_size": self.font_size,
             "font_bold": self.font_bold,
@@ -74,6 +130,10 @@ class ShapePropertiesDock(QWidget):
             "text_align": self.text_align,
             "vertical_align": self.vertical_align,
         }
+
+        self.txt_shape_text = QTextEdit()
+        self.txt_shape_text.textChanged.connect(self._on_txt_shape_text_changed)
+        self.txt_shape_text.cursorPositionChanged.connect(self._on_headless_cursor_changed)
 
         self._text_commit_timer = QTimer(self)
         self._text_commit_timer.setSingleShot(True)
@@ -142,20 +202,40 @@ class ShapePropertiesDock(QWidget):
         self.btn_tool_select.setStyleSheet("text-align: left; padding: 4px 8px; font-weight: bold; background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; border-radius: 3px;")
         layout.addWidget(tool_group)
 
-        # 2. Teksti ja Typografia (Objektin sisäinen teksti / Textbox)
-        text_group = QGroupBox("🔤 Teksti ja Typografia (Valittu objekti / Textbox)")
+        # 2. Typografia ja Muotoilu (Valittu laatikko / Textbox)
+        text_group = QGroupBox("🔤 Typografia ja Muotoilu (Valittu laatikko)")
         text_layout = QVBoxLayout(text_group)
         text_layout.setSpacing(6)
 
-        # Tekstikenttä
-        self.txt_shape_text = QPlainTextEdit()
-        self.txt_shape_text.setPlaceholderText("Kirjoita teksti tähän... (esim. nimesi tai otsikko)")
-        self.txt_shape_text.setFixedHeight(58)
-        self.txt_shape_text.setStyleSheet(
-            "background-color: #16161a; color: #f8fafc; border: 1px solid #4a4a58; border-radius: 3px; padding: 4px; font-size: 12px;"
-        )
-        self.txt_shape_text.textChanged.connect(self._on_text_changed)
-        text_layout.addWidget(self.txt_shape_text)
+        # Kohdistus / Laajuus (Scope: Valinta/Kirjoitus vs Rivi vs Koko laatikko)
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(8)
+        scope_row.addWidget(QLabel("Kohdistus:"))
+        self.scope_button_group = QButtonGroup(self)
+        self.rb_scope_selection = QRadioButton("🎯 Valinta / Kirjoitus")
+        self.rb_scope_selection.setChecked(True)
+        self.rb_scope_selection.setToolTip("Muotoile kankaalla valittu teksti tai seuraavaksi kirjoitettavat merkit.")
+        self.scope_button_group.addButton(self.rb_scope_selection)
+        scope_row.addWidget(self.rb_scope_selection)
+
+        self.rb_scope_line = QRadioButton("📄 Rivi")
+        self.rb_scope_line.setToolTip("Muotoile kursorin alla oleva koko rivi.")
+        self.scope_button_group.addButton(self.rb_scope_line)
+        scope_row.addWidget(self.rb_scope_line)
+
+        self.rb_scope_all = QRadioButton("🌐 Koko teksti")
+        self.rb_scope_all.setToolTip("Muotoile koko tekstilaatikon kaikki rivit kerralla.")
+        self.scope_button_group.addButton(self.rb_scope_all)
+        scope_row.addWidget(self.rb_scope_all)
+
+        self.btn_select_all_text = QPushButton("🔲 Valitse kaikki")
+        self.btn_select_all_text.setToolTip("Valitse koko teksti kankaalla (Ctrl+A)")
+        self.btn_select_all_text.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.btn_select_all_text.clicked.connect(self.select_all_text_requested.emit)
+        scope_row.addWidget(self.btn_select_all_text)
+
+        scope_row.addStretch()
+        text_layout.addLayout(scope_row)
 
         # Fonttiperhe ja Koko
         font_row = QHBoxLayout()
@@ -174,39 +254,39 @@ class ShapePropertiesDock(QWidget):
         font_row.addWidget(self.btn_manage_fonts)
 
         font_row.addWidget(QLabel("Koko:"))
-        self.spin_font_size = QDoubleSpinBox()
-        self.spin_font_size.setRange(6.0, 120.0)
-        self.spin_font_size.setSingleStep(1.0)
+        self.spin_font_size = FontDoubleSpinBox()
         self.spin_font_size.setValue(14.0)
-        self.spin_font_size.setSuffix(" pt")
         self.spin_font_size.valueChanged.connect(self._on_font_size_changed)
         font_row.addWidget(self.spin_font_size, 1)
         text_layout.addLayout(font_row)
 
-        # Tyylit (B, I) ja Väri
+        # Tyylit (B, I) ja Yksi selkeä Väripainike
         style_color_row = QHBoxLayout()
         style_color_row.addWidget(QLabel("Tyyli:"))
         self.btn_text_bold = QPushButton("B")
         self.btn_text_bold.setCheckable(True)
-        self.btn_text_bold.setFixedWidth(30)
+        self.btn_text_bold.setFixedWidth(28)
         self.btn_text_bold.setStyleSheet("font-weight: bold; padding: 3px;")
         self.btn_text_bold.toggled.connect(self._on_bold_toggled)
         style_color_row.addWidget(self.btn_text_bold)
 
         self.btn_text_italic = QPushButton("I")
         self.btn_text_italic.setCheckable(True)
-        self.btn_text_italic.setFixedWidth(30)
+        self.btn_text_italic.setFixedWidth(28)
         self.btn_text_italic.setStyleSheet("font-style: italic; font-weight: bold; padding: 3px;")
         self.btn_text_italic.toggled.connect(self._on_italic_toggled)
         style_color_row.addWidget(self.btn_text_italic)
 
         style_color_row.addSpacing(6)
-        style_color_row.addWidget(QLabel("Tekstin väri:"))
+        style_color_row.addWidget(QLabel("Väri:"))
         self.btn_text_color = QPushButton()
-        self.btn_text_color.setFixedWidth(45)
+        self.btn_text_color.setToolTip("Valitse tekstin väri...")
+        self.btn_text_color.setFixedSize(36, 26)
+        self.btn_text_color.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_text_color.clicked.connect(self._pick_text_color)
         style_color_row.addWidget(self.btn_text_color)
-        style_color_row.addStretch()
+        style_color_row.addStretch(1)
+
         text_layout.addLayout(style_color_row)
 
         # Vaakatasaus (Alignment)
@@ -460,6 +540,7 @@ class ShapePropertiesDock(QWidget):
         self.rotation = p.get("rotation", 0.0)
 
         self.shape_text = p.get("shape_text", "")
+        self.shape_html = p.get("shape_html", None)
         self.font_family = p.get("font_family", "Helvetica")
         self.font_size = p.get("font_size", 14.0)
         self.font_bold = p.get("font_bold", False)
@@ -502,10 +583,6 @@ class ShapePropertiesDock(QWidget):
             self.rb_behind.setChecked(True)
         self.rb_behind.blockSignals(False)
         self.rb_over.blockSignals(False)
-
-        self.txt_shape_text.blockSignals(True)
-        self.txt_shape_text.setPlainText(self.shape_text)
-        self.txt_shape_text.blockSignals(False)
 
         self.combo_font_family.blockSignals(True)
         idx = self.combo_font_family.findText(self.font_family)
@@ -579,7 +656,24 @@ class ShapePropertiesDock(QWidget):
         h2.setForeground(QColor("#94a3b8"))
         model.appendRow(h2)
 
-        standard_list = ["Helvetica", "Times New Roman", "Courier", "Arial", "Liberation Sans", "DejaVu Sans"]
+        sys_fonts_set = set()
+        standard_list = []
+        try:
+            for fam in QFontDatabase.families():
+                fam_clean = fam.strip()
+                if not fam_clean or fam_clean.startswith(".") or fam_clean.startswith("@") or fam_clean.endswith(".pcf") or fam_clean == "cursor":
+                    continue
+                if fam_clean not in self._doc_fonts and fam_clean not in sys_fonts_set:
+                    sys_fonts_set.add(fam_clean)
+                    standard_list.append(fam_clean)
+        except Exception:
+            pass
+
+        # Varmistetaan yleisimmät fonttinimet
+        for fallback in ["Helvetica", "Times New Roman", "Courier", "Arial", "Liberation Sans", "DejaVu Sans"]:
+            if fallback not in self._doc_fonts and fallback not in sys_fonts_set:
+                standard_list.append(fallback)
+                sys_fonts_set.add(fallback)
 
         # Haetaan lisäksi lokaalit asennetut/puretut käyttäjäfontit
         try:
@@ -587,10 +681,13 @@ class ShapePropertiesDock(QWidget):
             for flist in user_fonts.values():
                 for item in flist:
                     fam = item.get("clean_family")
-                    if fam and fam not in standard_list and fam not in self._doc_fonts:
+                    if fam and fam not in standard_list and fam not in self._doc_fonts and fam not in sys_fonts_set:
                         standard_list.append(fam)
+                        sys_fonts_set.add(fam)
         except Exception:
             pass
+
+        standard_list.sort(key=lambda s: s.lower())
 
         for f in standard_list:
             it = QStandardItem(f)
@@ -598,10 +695,14 @@ class ShapePropertiesDock(QWidget):
 
         if hasattr(self, "combo_font_family"):
             self.combo_font_family.setModel(model)
+            completer = QCompleter(model, self.combo_font_family)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.combo_font_family.setCompleter(completer)
 
             target = current_selection or self.font_family
             if not target or target.startswith("──"):
-                target = self._doc_fonts[0] if self._doc_fonts else "Helvetica"
+                target = self._doc_fonts[0] if self._doc_fonts else (standard_list[0] if standard_list else "Helvetica")
 
             idx = self.combo_font_family.findText(target)
             if idx >= 0:
@@ -679,35 +780,66 @@ class ShapePropertiesDock(QWidget):
 
             # Tekstiominaisuudet
             new_text = shape_data.get("text", "")
+            new_html = shape_data.get("html")
             self.shape_text = new_text
-            if self.txt_shape_text.toPlainText() != new_text:
-                cursor = self.txt_shape_text.textCursor()
-                old_pos = cursor.position()
-                self.txt_shape_text.setPlainText(new_text)
-                cursor.setPosition(min(old_pos, len(new_text)))
-                self.txt_shape_text.setTextCursor(cursor)
+            self.shape_html = new_html
 
             self.font_family = shape_data.get("font_family", "Helvetica")
+            self.font_size = float(shape_data.get("font_size", 14.0))
+            self.font_bold = bool(shape_data.get("font_bold", False))
+            self.font_italic = bool(shape_data.get("font_italic", False))
+            tc = shape_data.get("text_color", (0.0, 0.0, 0.0))
+            self.text_color_rgb = (float(tc[0]), float(tc[1]), float(tc[2]))
+            hex_c = f"#{int(self.text_color_rgb[0]*255):02x}{int(self.text_color_rgb[1]*255):02x}{int(self.text_color_rgb[2]*255):02x}"
+            t_align = shape_data.get("text_align", "center")
+            self.text_align = t_align
+
+            self.shape_text = new_text
+            self.shape_html = new_html
+
+            doc_font = QFont(self.font_family, int(self.font_size))
+            if self.font_bold:
+                doc_font.setBold(True)
+            if self.font_italic:
+                doc_font.setItalic(True)
+            self.txt_shape_text.setFont(doc_font)
+            self.txt_shape_text.document().setDefaultFont(doc_font)
+
+            old_c = self.txt_shape_text.textCursor()
+            old_pos = old_c.position()
+            old_anc = old_c.anchor()
+
+            self.txt_shape_text.blockSignals(True)
+            if new_html and str(new_html).strip():
+                if self.txt_shape_text.toHtml() != new_html:
+                    self.txt_shape_text.setHtml(new_html)
+                    c = self.txt_shape_text.textCursor()
+                    max_l = len(self.txt_shape_text.toPlainText())
+                    c.setPosition(min(old_anc, max_l))
+                    c.setPosition(min(old_pos, max_l), QTextCursor.MoveMode.KeepAnchor)
+                    self.txt_shape_text.setTextCursor(c)
+            else:
+                if self.txt_shape_text.toPlainText() != new_text:
+                    if new_text:
+                        self.txt_shape_text.setPlainText(new_text)
+                    else:
+                        self.txt_shape_text.clear()
+                    c = self.txt_shape_text.textCursor()
+                    max_l = len(self.txt_shape_text.toPlainText())
+                    c.setPosition(min(old_anc, max_l))
+                    c.setPosition(min(old_pos, max_l), QTextCursor.MoveMode.KeepAnchor)
+                    self.txt_shape_text.setTextCursor(c)
+            self.txt_shape_text.blockSignals(False)
+
             idx = self.combo_font_family.findText(self.font_family)
             if idx >= 0:
                 self.combo_font_family.setCurrentIndex(idx)
             else:
                 self.combo_font_family.setCurrentText(self.font_family)
 
-            self.font_size = float(shape_data.get("font_size", 14.0))
             self.spin_font_size.setValue(self.font_size)
-
-            self.font_bold = bool(shape_data.get("font_bold", False))
             self.btn_text_bold.setChecked(self.font_bold)
-
-            self.font_italic = bool(shape_data.get("font_italic", False))
             self.btn_text_italic.setChecked(self.font_italic)
-
-            tc = shape_data.get("text_color", (0.0, 0.0, 0.0))
-            self.text_color_rgb = (float(tc[0]), float(tc[1]), float(tc[2]))
-
-            t_align = shape_data.get("text_align", "center")
-            self.text_align = t_align
             if t_align == "left":
                 self.btn_align_left.setChecked(True)
             elif t_align == "right":
@@ -729,61 +861,245 @@ class ShapePropertiesDock(QWidget):
             if self.selected_shape_id is None:
                 self._emit_properties(commit_undo=False)
 
-    def _on_text_changed(self):
-        if self._loading_properties:
+    def _on_txt_shape_text_changed(self):
+        if self._loading_properties or getattr(self, "_syncing_controls", False) or getattr(self, "_formatting_in_progress", False):
             return
         self.shape_text = self.txt_shape_text.toPlainText()
+        self.shape_html = self.txt_shape_text.toHtml()
         if self.selected_shape_id is None:
             self.default_props["shape_text"] = self.shape_text
+            self.default_props["shape_html"] = self.shape_html
         self._emit_properties(commit_undo=False)
         self._text_commit_timer.start(400)
 
+    def get_scope(self) -> str:
+        """Palauttaa aktiivisen muotoilukohdistuksen ('selection', 'line', 'all')."""
+        if hasattr(self, "rb_scope_line") and self.rb_scope_line.isChecked():
+            return "line"
+        elif hasattr(self, "rb_scope_all") and self.rb_scope_all.isChecked():
+            return "all"
+        return "selection"
+
+    def update_from_cursor_format(self, info: Dict[str, Any]):
+        """Päivittää typografiasäätimet vastaamaan kankaalla valitun tekstin tai kursorin muotoilua."""
+        if self._loading_properties or getattr(self, "_syncing_controls", False) or getattr(self, "_formatting_in_progress", False):
+            return
+        self._syncing_controls = True
+        try:
+            fam = info.get("font_family")
+            if fam and fam.strip():
+                idx = self.combo_font_family.findText(fam.strip())
+                if idx >= 0:
+                    self.combo_font_family.setCurrentIndex(idx)
+                else:
+                    self.combo_font_family.setCurrentText(fam.strip())
+
+            sz = info.get("font_size")
+            if sz and float(sz) > 0:
+                self.spin_font_size.setValue(float(sz))
+
+            if "font_bold" in info:
+                self.btn_text_bold.setChecked(bool(info["font_bold"]))
+            if "font_italic" in info:
+                self.btn_text_italic.setChecked(bool(info["font_italic"]))
+
+            align = info.get("text_align")
+            if align == "left":
+                self.btn_align_left.setChecked(True)
+            elif align == "right":
+                self.btn_align_right.setChecked(True)
+            elif align == "justify":
+                self.btn_align_justify.setChecked(True)
+            elif align == "center":
+                self.btn_align_center.setChecked(True)
+
+            col = info.get("text_color")
+            if col:
+                self.text_color_rgb = (float(col[0]), float(col[1]), float(col[2]))
+                self._update_color_buttons()
+        finally:
+            self._syncing_controls = False
+
+    def _on_headless_cursor_changed(self):
+        """Päivittää säätimet kun kursori liikkuu sisäisessä tekstikentässä (yksikkötestit)."""
+        if self._loading_properties or getattr(self, "_syncing_controls", False) or getattr(self, "_formatting_in_progress", False):
+            return
+        c = self.txt_shape_text.textCursor()
+        fmt = c.charFormat()
+        bf = c.blockFormat()
+        fam = fmt.font().family()
+        sz = fmt.fontPointSize()
+        bold = fmt.fontWeight() >= QFont.Weight.Bold
+        italic = fmt.fontItalic()
+        col = fmt.foreground().color()
+        rgb = (col.redF(), col.greenF(), col.blueF()) if col.isValid() and col.alpha() > 0 else None
+        align_flag = bf.alignment()
+        align = "center"
+        if align_flag & Qt.AlignmentFlag.AlignLeft:
+            align = "left"
+        elif align_flag & Qt.AlignmentFlag.AlignRight:
+            align = "right"
+        elif align_flag & Qt.AlignmentFlag.AlignJustify:
+            align = "justify"
+        self.update_from_cursor_format({
+            "font_family": fam,
+            "font_size": sz,
+            "font_bold": bold,
+            "font_italic": italic,
+            "text_color": rgb,
+            "text_align": align,
+            "has_selection": c.hasSelection()
+        })
+
+    def _apply_formatting_to_target(
+        self,
+        fmt: Optional[QTextCharFormat] = None,
+        block_fmt: Optional[QTextBlockFormat] = None,
+        commit_undo: bool = True
+    ):
+        """
+        Lähettää muotoilupyynnön (merkki- tai kappalemuotoilu) kankaalle aktiivisen kohdistuksen mukaisesti:
+        - 'selection': muotoilee kankaalla valitun tekstin tai asettaa seuraavaksi kirjoitettavien merkkien muotoilun.
+        - 'line': muotoilee kursorin alla olevan koko rivin.
+        - 'all': muotoilee koko tekstilaatikon kaikki rivit.
+        """
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
+            return
+
+        self._formatting_in_progress = True
+        try:
+            target_cursor = QTextCursor(self.txt_shape_text.textCursor())
+            scope = self.get_scope()
+            if target_cursor.hasSelection():
+                if fmt:
+                    target_cursor.mergeCharFormat(fmt)
+                if block_fmt:
+                    target_cursor.mergeBlockFormat(block_fmt)
+            elif scope == "all":
+                target_cursor.select(QTextCursor.SelectionType.Document)
+                if fmt:
+                    target_cursor.mergeCharFormat(fmt)
+                    doc_f = self.txt_shape_text.document().defaultFont()
+                    font_fam = fmt.font().family()
+                    if font_fam:
+                        doc_f.setFamily(font_fam)
+                    if fmt.fontPointSize() > 0:
+                        doc_f.setPointSizeF(fmt.fontPointSize())
+                    if fmt.fontWeight() > 0:
+                        doc_f.setWeight(fmt.fontWeight())
+                    doc_f.setItalic(fmt.fontItalic())
+                    self.txt_shape_text.document().setDefaultFont(doc_f)
+                if block_fmt:
+                    target_cursor.mergeBlockFormat(block_fmt)
+            elif scope == "line":
+                target_cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+                if fmt:
+                    target_cursor.mergeCharFormat(fmt)
+                if block_fmt:
+                    target_cursor.mergeBlockFormat(block_fmt)
+            else:
+                if fmt:
+                    self.txt_shape_text.mergeCurrentCharFormat(fmt)
+                if block_fmt:
+                    target_cursor.mergeBlockFormat(block_fmt)
+
+            self.shape_text = self.txt_shape_text.toPlainText()
+            self.shape_html = self.txt_shape_text.toHtml()
+        finally:
+            self._formatting_in_progress = False
+
+        props = self.get_current_properties()
+        props["target_shape_id"] = self.selected_shape_id
+        props["commit_undo"] = commit_undo
+        props["formatting_scope"] = self.get_scope()
+        if fmt is not None:
+            props["char_format"] = fmt
+        if block_fmt is not None:
+            props["block_format"] = block_fmt
+
+        self.properties_changed.emit(props)
+
     def _on_font_family_changed(self, text: str):
-        if self._loading_properties:
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
             return
         clean_text = (text or "").strip()
         if not clean_text or clean_text.startswith("──") or clean_text.startswith("---"):
             return
         self.font_family = clean_text
-        self.default_props["font_family"] = clean_text
-        self._emit_properties(commit_undo=True)
+        if self.selected_shape_id is None:
+            self.default_props["font_family"] = clean_text
+
+        fmt = QTextCharFormat()
+        fmt.setFontFamily(clean_text)
+        self._apply_formatting_to_target(fmt=fmt, commit_undo=True)
 
     def _on_font_size_changed(self, val: float):
-        if self._loading_properties:
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
             return
         self.font_size = val
-        self.default_props["font_size"] = val
-        self._emit_properties(commit_undo=True)
+        if self.selected_shape_id is None:
+            self.default_props["font_size"] = val
+
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(val)
+        self._apply_formatting_to_target(fmt=fmt, commit_undo=True)
 
     def _on_bold_toggled(self, checked: bool):
-        if self._loading_properties:
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
             return
         self.font_bold = checked
-        self.default_props["font_bold"] = checked
-        self._emit_properties(commit_undo=True)
+        if self.selected_shape_id is None:
+            self.default_props["font_bold"] = checked
+
+        fmt = QTextCharFormat()
+        fmt.setFontWeight(QFont.Weight.Bold if checked else QFont.Weight.Normal)
+        self._apply_formatting_to_target(fmt=fmt, commit_undo=True)
 
     def _on_italic_toggled(self, checked: bool):
-        if self._loading_properties:
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
             return
         self.font_italic = checked
-        self.default_props["font_italic"] = checked
-        self._emit_properties(commit_undo=True)
+        if self.selected_shape_id is None:
+            self.default_props["font_italic"] = checked
+
+        fmt = QTextCharFormat()
+        fmt.setFontItalic(checked)
+        self._apply_formatting_to_target(fmt=fmt, commit_undo=True)
+
+    def set_text_color(self, rgb: Tuple[float, float, float]):
+        """Asettaa tekstivärin joko valitulle tekstijaksolle, riville tai koko muodolle."""
+        self.text_color_rgb = rgb
+        if self.selected_shape_id is None:
+            self.default_props["text_color_rgb"] = self.text_color_rgb
+        self._update_color_buttons()
+
+        c = QColor(int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
+        fmt = QTextCharFormat()
+        fmt.setForeground(c)
+        self._apply_formatting_to_target(fmt=fmt, commit_undo=True)
 
     def _pick_text_color(self):
         cur = QColor(int(self.text_color_rgb[0]*255), int(self.text_color_rgb[1]*255), int(self.text_color_rgb[2]*255))
         c = QColorDialog.getColor(cur, self, "Valitse tekstin väri")
         if c.isValid():
-            self.text_color_rgb = (c.redF(), c.greenF(), c.blueF())
-            self.default_props["text_color_rgb"] = self.text_color_rgb
-            self._update_color_buttons()
-            self._emit_properties(commit_undo=True)
+            self.set_text_color((c.redF(), c.greenF(), c.blueF()))
 
     def _on_align_clicked(self, align_code: str):
-        if self._loading_properties:
+        if self._loading_properties or getattr(self, "_syncing_controls", False):
             return
         self.text_align = align_code
-        self.default_props["text_align"] = align_code
-        self._emit_properties(commit_undo=True)
+        if self.selected_shape_id is None:
+            self.default_props["text_align"] = align_code
+
+        align_flags = {
+            "left": Qt.AlignmentFlag.AlignLeft,
+            "center": Qt.AlignmentFlag.AlignHCenter,
+            "right": Qt.AlignmentFlag.AlignRight,
+            "justify": Qt.AlignmentFlag.AlignJustify,
+        }
+        bf = QTextBlockFormat()
+        bf.setAlignment(align_flags.get(align_code, Qt.AlignmentFlag.AlignHCenter))
+        self._apply_formatting_to_target(block_fmt=bf, commit_undo=True)
 
     def _on_valign_changed(self, idx: int):
         if self._loading_properties:
@@ -815,7 +1131,8 @@ class ShapePropertiesDock(QWidget):
         c = QColorDialog.getColor(cur, self, "Valitse täyttöväri")
         if c.isValid():
             self.fill_rgb = (c.redF(), c.greenF(), c.blueF())
-            self.default_props["fill_rgb"] = self.fill_rgb
+            if self.selected_shape_id is None:
+                self.default_props["fill_rgb"] = self.fill_rgb
             self._update_color_buttons()
             self._emit_properties(commit_undo=True)
 
@@ -824,7 +1141,8 @@ class ShapePropertiesDock(QWidget):
         c = QColorDialog.getColor(cur, self, "Valitse reunaviivan väri")
         if c.isValid():
             self.stroke_rgb = (c.redF(), c.greenF(), c.blueF())
-            self.default_props["stroke_rgb"] = self.stroke_rgb
+            if self.selected_shape_id is None:
+                self.default_props["stroke_rgb"] = self.stroke_rgb
             self._update_color_buttons()
             self._emit_properties(commit_undo=True)
 
@@ -833,21 +1151,24 @@ class ShapePropertiesDock(QWidget):
             return
         self.fill_opacity = val / 100.0
         self.lbl_opacity.setText(f"{val} %")
-        self.default_props["fill_opacity"] = self.fill_opacity
+        if self.selected_shape_id is None:
+            self.default_props["fill_opacity"] = self.fill_opacity
         self._emit_properties(commit_undo=False)
 
     def _on_stroke_width_changed(self, val: float):
         if self._loading_properties:
             return
         self.stroke_width = val
-        self.default_props["stroke_width"] = val
+        if self.selected_shape_id is None:
+            self.default_props["stroke_width"] = val
         self._emit_properties(commit_undo=True)
 
     def _on_radius_changed(self, val: float):
         if self._loading_properties:
             return
         self.corner_radius = val
-        self.default_props["corner_radius"] = val
+        if self.selected_shape_id is None:
+            self.default_props["corner_radius"] = val
         self._emit_properties(commit_undo=True)
 
     def set_rotation(self, deg: float):
@@ -857,7 +1178,8 @@ class ShapePropertiesDock(QWidget):
         while deg < -180.0:
             deg += 360.0
         self.rotation = deg
-        self.default_props["rotation"] = deg
+        if self.selected_shape_id is None:
+            self.default_props["rotation"] = deg
         self.spin_rotation.blockSignals(True)
         self.slider_rotation.blockSignals(True)
         self.spin_rotation.setValue(deg)
@@ -870,7 +1192,8 @@ class ShapePropertiesDock(QWidget):
         if self._loading_properties:
             return
         self.rotation = val
-        self.default_props["rotation"] = val
+        if self.selected_shape_id is None:
+            self.default_props["rotation"] = val
         self.slider_rotation.blockSignals(True)
         self.slider_rotation.setValue(int(val))
         self.slider_rotation.blockSignals(False)
@@ -880,7 +1203,8 @@ class ShapePropertiesDock(QWidget):
         if self._loading_properties:
             return
         self.rotation = float(val)
-        self.default_props["rotation"] = self.rotation
+        if self.selected_shape_id is None:
+            self.default_props["rotation"] = self.rotation
         self.spin_rotation.blockSignals(True)
         self.spin_rotation.setValue(self.rotation)
         self.spin_rotation.blockSignals(False)
@@ -907,6 +1231,7 @@ class ShapePropertiesDock(QWidget):
             "overlay": self.overlay,
             "rotation": self.rotation,
             "text": self.shape_text,
+            "html": getattr(self, "shape_html", None),
             "font_family": self.font_family,
             "font_size": self.font_size,
             "font_bold": self.font_bold,

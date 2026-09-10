@@ -7,20 +7,23 @@ perusviivan (baseline) visualisointia ja sulavaa zoomausta.
 from typing import Optional, Dict, Any, List, Tuple
 import fitz
 import math
+import html
 from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import (
     QImage, QPixmap, QPainter, QColor, QPen, QBrush, QWheelEvent, QMouseEvent,
-    QKeyEvent, QContextMenuEvent, QKeySequence, QGuiApplication, QPolygonF
+    QKeyEvent, QContextMenuEvent, QKeySequence, QGuiApplication, QPolygonF,
+    QTextCharFormat, QFont, QTextCursor, QPalette, QTextDocument
 )
-from PyQt6.QtWidgets import QWidget, QMenu, QPlainTextEdit
+from PyQt6.QtWidgets import QWidget, QMenu, QPlainTextEdit, QTextEdit
 
 from pdf_engine.pdf_document import PDFDocumentModel
 
 
-class InlineShapeEditor(QPlainTextEdit):
-    """Kankaalla kelluva suora tekstinsyöttöeditori muodoille ja tekstilaatikoille."""
+class InlineShapeEditor(QTextEdit):
+    """Kankaalla kelluva suora tekstinsyöttöeditori muodoille ja tekstilaatikoille (tukee myös rikkaata tekstiä ja useita fontteja)."""
     escape_pressed = pyqtSignal()
     commit_requested = pyqtSignal()
+    cursor_format_changed = pyqtSignal(dict)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -28,6 +31,41 @@ class InlineShapeEditor(QPlainTextEdit):
         self.setStyleSheet(
             "background-color: #1e1e24; color: #f8fafc; border: 2px solid #38bdf8; border-radius: 4px; padding: 4px; font-size: 13px;"
         )
+        pal = self.palette()
+        pal.setColor(QPalette.ColorGroup.Inactive, QPalette.ColorRole.Highlight, QColor(0, 120, 215, 180))
+        pal.setColor(QPalette.ColorGroup.Inactive, QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+        self.setPalette(pal)
+
+        self.cursorPositionChanged.connect(self._on_cursor_changed)
+        self.selectionChanged.connect(self._on_cursor_changed)
+
+    def _on_cursor_changed(self):
+        c = self.textCursor()
+        fmt = c.charFormat()
+        bf = c.blockFormat()
+        fam = fmt.font().family() or self.font().family()
+        sz = fmt.fontPointSize() if fmt.fontPointSize() > 0 else (fmt.font().pointSizeF() if fmt.font().pointSizeF() > 0 else self.font().pointSizeF())
+        bold = fmt.fontWeight() >= QFont.Weight.Bold
+        italic = fmt.fontItalic()
+        col = fmt.foreground().color()
+        rgb = (col.redF(), col.greenF(), col.blueF()) if col.isValid() else None
+        align_flag = bf.alignment()
+        align = "center"
+        if align_flag & Qt.AlignmentFlag.AlignLeft:
+            align = "left"
+        elif align_flag & Qt.AlignmentFlag.AlignRight:
+            align = "right"
+        elif align_flag & Qt.AlignmentFlag.AlignJustify:
+            align = "justify"
+        self.cursor_format_changed.emit({
+            "font_family": fam,
+            "font_size": sz,
+            "font_bold": bold,
+            "font_italic": italic,
+            "text_color": rgb,
+            "text_align": align,
+            "has_selection": c.hasSelection()
+        })
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Escape:
@@ -38,6 +76,42 @@ class InlineShapeEditor(QPlainTextEdit):
             self.commit_requested.emit()
             event.accept()
             return
+        # Pikanäppäimet rikkaalle tekstille: Ctrl+B (lihavointi), Ctrl+I (kursivointi), Ctrl+U (alleviivaus)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_B:
+                fmt = QTextCharFormat()
+                is_bold = self.fontWeight() >= QFont.Weight.Bold
+                fmt.setFontWeight(QFont.Weight.Normal if is_bold else QFont.Weight.Bold)
+                c = self.textCursor()
+                if c.hasSelection():
+                    c.mergeCharFormat(fmt)
+                else:
+                    self.mergeCurrentCharFormat(fmt)
+                self._on_cursor_changed()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_I:
+                fmt = QTextCharFormat()
+                fmt.setFontItalic(not self.fontItalic())
+                c = self.textCursor()
+                if c.hasSelection():
+                    c.mergeCharFormat(fmt)
+                else:
+                    self.mergeCurrentCharFormat(fmt)
+                self._on_cursor_changed()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_U:
+                fmt = QTextCharFormat()
+                fmt.setFontUnderline(not self.fontUnderline())
+                c = self.textCursor()
+                if c.hasSelection():
+                    c.mergeCharFormat(fmt)
+                else:
+                    self.mergeCurrentCharFormat(fmt)
+                self._on_cursor_changed()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
 
@@ -74,6 +148,7 @@ class PDFPageCanvas(QWidget):
     tool_switched = pyqtSignal(str)
     request_focus_shape_text = pyqtSignal(str)
     shape_properties_committed = pyqtSignal()
+    shape_text_cursor_changed = pyqtSignal(dict)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -161,24 +236,68 @@ class PDFPageCanvas(QWidget):
         self.inline_shape_editor.escape_pressed.connect(lambda: self.finish_inline_shape_editor(commit=False))
         self.inline_shape_editor.commit_requested.connect(lambda: self.finish_inline_shape_editor(commit=True))
         self.inline_shape_editor.textChanged.connect(self._on_inline_shape_text_changed)
+        self.inline_shape_editor.cursor_format_changed.connect(self.shape_text_cursor_changed.emit)
         self._active_inline_shape_id: Optional[str] = None
         self._syncing_inline_editor: bool = False
 
+    def select_all_shape_text(self):
+        """Maalaa koko tekstilaatikon teksti valituksi kankaalla."""
+        if self._active_inline_shape_id:
+            self.inline_shape_editor.selectAll()
+            self.inline_shape_editor.setFocus()
+        elif self.selected_shape_id:
+            self.start_inline_shape_editor(self.selected_shape_id)
+            self.inline_shape_editor.selectAll()
+
     def _update_inline_shape_editor_style(self, shape: Dict[str, Any]):
-        """Päivittää in-canvas editorin värit ja kirjasinkoon muodon asetuksia vastaavaksi."""
+        """Päivittää in-canvas editorin värit ja kirjasinkoon muodon asetuksia vastaavaksi kontrastisuojauksella."""
         tc = shape.get("text_color", (0.0, 0.0, 0.0))
         tr, tg, tb = int(tc[0] * 255), int(tc[1] * 255), int(tc[2] * 255)
         hex_text = f"#{tr:02x}{tg:02x}{tb:02x}"
+        lum_t = 0.299 * tr + 0.587 * tg + 0.114 * tb
+
         fc = shape.get("fill_color")
         if fc:
             fr, fg, fb = int(fc[0] * 255), int(fc[1] * 255), int(fc[2] * 255)
-            bg_css = f"rgba({fr}, {fg}, {fb}, 0.95)"
+            lum_bg = 0.299 * fr + 0.587 * fg + 0.114 * fb
+            # Kontrastisuoja: jos tekstin ja taustan luminanssiero on liian pieni (esim. valkoinen teksti vaalealla pohjalla)
+            if abs(lum_t - lum_bg) < 65:
+                bg_css = "#1e1e24" if lum_t > 128 else "#ffffff"
+                border_color = "#38bdf8" if lum_t > 128 else "#0284c7"
+            else:
+                bg_css = f"rgba({fr}, {fg}, {fb}, 0.95)"
+                border_color = "#0284c7"
         else:
-            bg_css = "#ffffff" if (tr + tg + tb) < 380 else "#1e1e24"
+            # Ei täyttöväriä (läpinäkyvä laatikko valkoisella PDF-sivulla):
+            # Jos teksti on valkoista tai hyvin vaaleaa, käytetään editorissa tummaa taustaa, jotta teksti on näkyvissä!
+            if lum_t > 180:
+                bg_css = "#1e1e24"
+                border_color = "#38bdf8"
+            else:
+                bg_css = "#ffffff"
+                border_color = "#0284c7"
+
         fs = max(10, int(shape.get("font_size", 14.0) * self.zoom_factor * 0.9))
         self.inline_shape_editor.setStyleSheet(
-            f"background-color: {bg_css}; color: {hex_text}; border: 2px solid #0284c7; border-radius: 4px; padding: 4px; font-size: {fs}px;"
+            f"background-color: {bg_css}; color: {hex_text}; border: 2px solid {border_color}; border-radius: 4px; padding: 4px;"
         )
+        pal = self.inline_shape_editor.palette()
+        pal.setColor(QPalette.ColorRole.Text, QColor(tr, tg, tb))
+        self.inline_shape_editor.setPalette(pal)
+
+    def _adjust_inline_shape_editor_size(self):
+        """Säätää kankaan kelluvan editorin korkeuden automaattisesti tekstin määrän ja fonttikoon mukaan."""
+        if not self._active_inline_shape_id or not self.doc_model:
+            return
+        shape = self.doc_model.get_shape(self.current_page_idx, self._active_inline_shape_id)
+        if not shape:
+            return
+        bbox = self.doc_model._compute_shape_bbox(shape)
+        orig_w = max(70.0, (bbox[2] - bbox[0]) * self.zoom_factor)
+        orig_h = max(36.0, (bbox[3] - bbox[1]) * self.zoom_factor)
+        doc_h = self.inline_shape_editor.document().size().height() + 16
+        new_h = max(orig_h, doc_h)
+        self.inline_shape_editor.resize(int(orig_w), int(new_h))
 
     def start_inline_shape_editor(self, shape_id: str):
         """Käynnistää kankaalla kelluvan tekstieditorin suoraan muodon päällä."""
@@ -188,6 +307,11 @@ class PDFPageCanvas(QWidget):
         if not shape:
             return
         self._active_inline_shape_id = shape_id
+        if self.doc_model:
+            self.doc_model.active_editing_shape_id = shape_id
+            self.doc_model.reconstruct_page_shapes(self.current_page_idx)
+            self.refresh_page()
+
         bbox = self.doc_model._compute_shape_bbox(shape)
         x = bbox[0] * self.zoom_factor
         y = bbox[1] * self.zoom_factor
@@ -197,30 +321,68 @@ class PDFPageCanvas(QWidget):
         self._syncing_inline_editor = True
         try:
             self.inline_shape_editor.setGeometry(int(x), int(y), int(w), int(h))
-            self.inline_shape_editor.setPlainText(shape.get("text", ""))
+            # Asetetaan oletusfontti ja koko
+            fam = shape.get("font_family", "Helvetica")
+            sz = int(shape.get("font_size", 14.0))
+            f = QFont(fam, sz)
+            if shape.get("font_bold"):
+                f.setBold(True)
+            if shape.get("font_italic"):
+                f.setItalic(True)
+            self.inline_shape_editor.setFont(f)
+            self.inline_shape_editor.document().setDefaultFont(f)
+
+            if shape.get("html"):
+                self.inline_shape_editor.setHtml(shape["html"])
+            else:
+                txt = shape.get("text", "")
+                if txt:
+                    lines = txt.split("\n")
+                    tc = shape.get("text_color", (0.0, 0.0, 0.0))
+                    hex_c = f"#{int(tc[0]*255):02x}{int(tc[1]*255):02x}{int(tc[2]*255):02x}"
+                    b_style = "font-weight:bold;" if shape.get("font_bold") else ""
+                    i_style = "font-style:italic;" if shape.get("font_italic") else ""
+                    t_align = shape.get("text_align", "center")
+                    p_tags = "".join(
+                        f"<p style=\"margin:0; text-align:{t_align}; font-family:'{fam}'; font-size:{sz}pt; color:{hex_c}; {b_style} {i_style}\">"
+                        f"{html.escape(line) if line else '&nbsp;'}</p>"
+                        for line in lines
+                    )
+                    base_html = f"<html><body style=\"font-family:'{fam}'; font-size:{sz}pt; color:{hex_c};\">{p_tags}</body></html>"
+                    self.inline_shape_editor.setHtml(base_html)
+                else:
+                    self.inline_shape_editor.clear()
+
             self._update_inline_shape_editor_style(shape)
+            self._adjust_inline_shape_editor_size()
         finally:
             self._syncing_inline_editor = False
 
         self.inline_shape_editor.show()
         self.inline_shape_editor.setFocus()
         self.inline_shape_editor.selectAll()
+        self.inline_shape_editor._on_cursor_changed()
 
     def finish_inline_shape_editor(self, commit: bool = True):
         """Sulkee kankaan kelluvan tekstieditorin ja tallentaa muutoksen."""
-        if not self.inline_shape_editor.isVisible() or not self._active_inline_shape_id:
+        if not self._active_inline_shape_id:
             return
         target_id = self._active_inline_shape_id
         new_text = self.inline_shape_editor.toPlainText()
+        new_html = self.inline_shape_editor.toHtml()
         self.inline_shape_editor.hide()
         self._active_inline_shape_id = None
+        if self.doc_model:
+            self.doc_model.active_editing_shape_id = None
         if commit and self.doc_model:
-            self.doc_model.update_shape(self.current_page_idx, target_id, text=new_text, push_undo=True)
+            self.doc_model.update_shape(self.current_page_idx, target_id, text=new_text, html=new_html, push_undo=True)
             self.refresh_page()
             shape_data = self.doc_model.get_shape(self.current_page_idx, target_id)
             if shape_data:
                 self.shape_selected.emit(shape_data)
             self.shape_properties_committed.emit()
+        else:
+            self.refresh_page()
         self.setFocus()
         self.update()
 
@@ -228,7 +390,9 @@ class PDFPageCanvas(QWidget):
         if self._syncing_inline_editor or not self._active_inline_shape_id or not self.doc_model:
             return
         new_text = self.inline_shape_editor.toPlainText()
-        self.doc_model.update_shape(self.current_page_idx, self._active_inline_shape_id, text=new_text, push_undo=False)
+        new_html = self.inline_shape_editor.toHtml()
+        self.doc_model.update_shape(self.current_page_idx, self._active_inline_shape_id, text=new_text, html=new_html, push_undo=False)
+        self._adjust_inline_shape_editor_size()
         shape_data = self.doc_model.get_shape(self.current_page_idx, self._active_inline_shape_id)
         if shape_data:
             self.shape_selected.emit(shape_data)
@@ -495,17 +659,97 @@ class PDFPageCanvas(QWidget):
                 if "rotation" in props:
                     update_kwargs["rotation"] = props["rotation"]
 
-                if "text" in props:
-                    update_kwargs["text"] = props["text"]
-                if "font_family" in props:
+                # Typografia ja tekstimuotoilu
+                has_formatting = "char_format" in props or "block_format" in props
+                is_inline_active = bool(self._active_inline_shape_id and self._active_inline_shape_id == target_id)
+
+                if is_inline_active:
+                    if has_formatting:
+                        scope = props.get("formatting_scope", "selection")
+                        cursor = self.inline_shape_editor.textCursor()
+                        target_cursor = QTextCursor(cursor)
+                        if scope == "selection":
+                            if target_cursor.hasSelection():
+                                if "char_format" in props:
+                                    target_cursor.mergeCharFormat(props["char_format"])
+                                if "block_format" in props:
+                                    target_cursor.mergeBlockFormat(props["block_format"])
+                                self.inline_shape_editor.setTextCursor(target_cursor)
+                            else:
+                                if "char_format" in props:
+                                    self.inline_shape_editor.mergeCurrentCharFormat(props["char_format"])
+                                if "block_format" in props:
+                                    target_cursor.mergeBlockFormat(props["block_format"])
+                                    self.inline_shape_editor.setTextCursor(target_cursor)
+                        elif scope == "line":
+                            target_cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+                            if "char_format" in props:
+                                target_cursor.mergeCharFormat(props["char_format"])
+                            if "block_format" in props:
+                                target_cursor.mergeBlockFormat(props["block_format"])
+                            self.inline_shape_editor.setTextCursor(target_cursor)
+                        elif scope == "all":
+                            target_cursor.select(QTextCursor.SelectionType.Document)
+                            if "char_format" in props:
+                                target_cursor.mergeCharFormat(props["char_format"])
+                                doc_f = self.inline_shape_editor.document().defaultFont()
+                                font_fam = props["char_format"].font().family()
+                                if font_fam:
+                                    doc_f.setFamily(font_fam)
+                                if props["char_format"].fontPointSize() > 0:
+                                    doc_f.setPointSizeF(props["char_format"].fontPointSize())
+                                if props["char_format"].fontWeight() > 0:
+                                    doc_f.setWeight(props["char_format"].fontWeight())
+                                doc_f.setItalic(props["char_format"].fontItalic())
+                                self.inline_shape_editor.document().setDefaultFont(doc_f)
+                            if "block_format" in props:
+                                target_cursor.mergeBlockFormat(props["block_format"])
+                            self.inline_shape_editor.setTextCursor(target_cursor)
+
+                        self.inline_shape_editor._on_cursor_changed()
+
+                    update_kwargs["text"] = self.inline_shape_editor.toPlainText()
+                    update_kwargs["html"] = self.inline_shape_editor.toHtml()
+                    self._adjust_inline_shape_editor_size()
+                else:
+                    if has_formatting:
+                        scope = props.get("formatting_scope", "all")
+                        temp_doc = QTextDocument()
+                        if cur_shape.get("html"):
+                            temp_doc.setHtml(cur_shape["html"])
+                        else:
+                            temp_doc.setPlainText(cur_shape.get("text", ""))
+                        c = QTextCursor(temp_doc)
+                        if scope == "line":
+                            c.select(QTextCursor.SelectionType.BlockUnderCursor)
+                        else:
+                            c.select(QTextCursor.SelectionType.Document)
+
+                        if "char_format" in props:
+                            c.mergeCharFormat(props["char_format"])
+                        if "block_format" in props:
+                            c.mergeBlockFormat(props["block_format"])
+
+                        update_kwargs["text"] = temp_doc.toPlainText()
+                        update_kwargs["html"] = temp_doc.toHtml()
+                    else:
+                        if "text" in props:
+                            update_kwargs["text"] = props["text"]
+                        if "html" in props:
+                            update_kwargs["html"] = props["html"]
+
+                formatting_scope = props.get("formatting_scope", "selection")
+                should_update_root_font = (formatting_scope == "all") or not is_inline_active
+
+                if "font_family" in props and should_update_root_font:
                     update_kwargs["font_family"] = props["font_family"]
-                if "font_size" in props:
+                if "font_size" in props and should_update_root_font:
                     update_kwargs["font_size"] = props["font_size"]
-                if "font_bold" in props:
+                if "font_bold" in props and should_update_root_font:
                     update_kwargs["font_bold"] = props["font_bold"]
-                if "font_italic" in props:
+                if "font_italic" in props and should_update_root_font:
                     update_kwargs["font_italic"] = props["font_italic"]
-                if "text_color" in props:
+                if "text_color" in props and should_update_root_font:
                     update_kwargs["text_color"] = props["text_color"]
                 if "text_align" in props:
                     update_kwargs["text_align"] = props["text_align"]
@@ -519,26 +763,13 @@ class PDFPageCanvas(QWidget):
                         push_undo=commit_undo,
                         **update_kwargs
                     )
-                    self.refresh_page()
-                    self.shape_properties_committed.emit()
-
-                    # Jos kelluva in-canvas editori on auki tälle muodolle, synkronoidaan sen teksti säilyttäen kursori ja päivitetään tyyli
-                    if self.inline_shape_editor.isVisible() and self._active_inline_shape_id == target_id:
+                    if not is_inline_active:
+                        self.refresh_page()
+                    else:
                         cur_up = self.doc_model.get_shape(self.current_page_idx, target_id)
                         if cur_up:
                             self._update_inline_shape_editor_style(cur_up)
-                        if "text" in props and not self._syncing_inline_editor:
-                            new_t = props["text"]
-                            if self.inline_shape_editor.toPlainText() != new_t:
-                                cursor = self.inline_shape_editor.textCursor()
-                                old_pos = cursor.position()
-                                self._syncing_inline_editor = True
-                                try:
-                                    self.inline_shape_editor.setPlainText(new_t)
-                                    cursor.setPosition(min(old_pos, len(new_t)))
-                                    self.inline_shape_editor.setTextCursor(cursor)
-                                finally:
-                                    self._syncing_inline_editor = False
+                    self.shape_properties_committed.emit()
 
         self.update()
 
@@ -1039,7 +1270,9 @@ class PDFPageCanvas(QWidget):
         if not self.doc_model or not self.doc_model.is_open:
             return
 
-        if self.inline_shape_editor.isVisible():
+        self.setFocus()
+
+        if self._active_inline_shape_id:
             self.finish_inline_shape_editor(commit=True)
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1069,6 +1302,8 @@ class PDFPageCanvas(QWidget):
                     handles = self._get_shape_handles(cur_shape)
                     hit_handle = self._hit_test_handle(pos, handles)
                     if hit_handle:
+                        if getattr(self, "_active_inline_shape_id", None):
+                            self.finish_inline_shape_editor(commit=True)
                         if hit_handle == "rot":
                             self.is_rotating_shape = True
                             self.rotate_start_angle = float(cur_shape.get("rotation", 0.0))
@@ -1170,6 +1405,10 @@ class PDFPageCanvas(QWidget):
                     else:
                         geom = (p1, p2)
                     actual_fill = self.shape_fill_color if getattr(self, "shape_has_fill", True) and self.shape_fill_color else None
+                    actual_text_color = getattr(self, 'shape_text_color', (0.0, 0.0, 0.0))
+                    if drawn_tool == "textbox" and (actual_text_color[0] > 0.8 and actual_text_color[1] > 0.8 and actual_text_color[2] > 0.8):
+                        actual_text_color = (0.0, 0.0, 0.0)
+
                     new_id = self.doc_model.draw_shape(
                         page_idx=self.current_page_idx,
                         shape_type=drawn_tool,
@@ -1187,7 +1426,7 @@ class PDFPageCanvas(QWidget):
                         font_size=getattr(self, 'shape_font_size', 14.0),
                         font_bold=getattr(self, 'shape_font_bold', False),
                         font_italic=getattr(self, 'shape_font_italic', False),
-                        text_color=getattr(self, 'shape_text_color', (0.0, 0.0, 0.0)),
+                        text_color=actual_text_color,
                         text_align=getattr(self, 'shape_text_align', "center"),
                         vertical_align=getattr(self, 'shape_vertical_align', "middle"),
                     )

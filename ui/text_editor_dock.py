@@ -160,14 +160,15 @@ class TextEditorDock(QWidget):
         strategy_row.addWidget(self.strategy_combo)
         typo_layout.addLayout(strategy_row)
 
-        # Fonttikoko & Väri
         # Fonttikoko, Lihavointi/Kursivointi & Väri
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Koko (pt):"))
         self.size_spin = QDoubleSpinBox()
-        self.size_spin.setRange(2.0, 200.0)
+        self.size_spin.setRange(4.0, 200.0)
+        self.size_spin.setValue(12.0)
         self.size_spin.setSingleStep(0.5)
         self.size_spin.setDecimals(1)
+        self.size_spin.setEnabled(False)
         self.size_spin.valueChanged.connect(self._on_text_changed)
         tools_row.addWidget(self.size_spin)
 
@@ -176,6 +177,7 @@ class TextEditorDock(QWidget):
         self.btn_bold.setFixedWidth(30)
         self.btn_bold.setStyleSheet("font-weight: bold; font-size: 13px;")
         self.btn_bold.setToolTip("Lihavointi (Bold / Ctrl+B)")
+        self.btn_bold.setEnabled(False)
         self.btn_bold.toggled.connect(self._on_style_toggled)
         tools_row.addWidget(self.btn_bold)
 
@@ -184,10 +186,12 @@ class TextEditorDock(QWidget):
         self.btn_italic.setFixedWidth(30)
         self.btn_italic.setStyleSheet("font-style: italic; font-size: 13px;")
         self.btn_italic.setToolTip("Kursivointi (Italic / Ctrl+I)")
+        self.btn_italic.setEnabled(False)
         self.btn_italic.toggled.connect(self._on_style_toggled)
         tools_row.addWidget(self.btn_italic)
 
         self.color_btn = QPushButton("Väri...")
+        self.color_btn.setEnabled(False)
         self.color_btn.clicked.connect(self._pick_color)
         tools_row.addWidget(self.color_btn)
         typo_layout.addLayout(tools_row)

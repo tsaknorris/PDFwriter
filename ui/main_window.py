@@ -175,12 +175,15 @@ class MainWindow(QMainWindow):
         self.shape_widget.add_background_to_selection_requested.connect(self.canvas.add_background_card_to_selected_block)
         self.shape_widget.delete_shape_requested.connect(self.canvas.delete_selected_shape)
         self.shape_widget.font_manager_requested.connect(self.show_font_manager_dialog)
+        self.shape_widget.select_all_text_requested.connect(self.canvas.select_all_shape_text)
         self.canvas.shape_selected.connect(self._on_shape_selected)
         self.canvas.tool_switched.connect(self.shape_widget.set_tool)
         self.canvas.request_focus_shape_text.connect(self._on_request_focus_shape_text)
+        self.canvas.shape_text_cursor_changed.connect(self.shape_widget.update_from_cursor_format)
         self.shape_dock.setWidget(self.shape_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.shape_dock)
-        self.tabifyDockWidget(self.inspector_dock, self.shape_dock)
+        self.tabifyDockWidget(self.editor_dock, self.shape_dock)
+        self.tabifyDockWidget(self.shape_dock, self.inspector_dock)
 
         # Oikea alapalkki (välilehti): Tasot & Objektit (Z-Order, Layers, Groups)
         self.layers_dock = QDockWidget("Tasot && Objektit (Layers)", self)
@@ -192,7 +195,7 @@ class MainWindow(QMainWindow):
         self.canvas.block_selected.connect(lambda b: self.layers_widget.select_item_by_id(b.get("block_id") if b else None))
         self.layers_dock.setWidget(self.layers_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.layers_dock)
-        self.tabifyDockWidget(self.shape_dock, self.layers_dock)
+        self.tabifyDockWidget(self.inspector_dock, self.layers_dock)
 
         self.canvas.shape_drawn.connect(self._on_shape_drawn)
         self.canvas.shape_properties_committed.connect(self._on_shape_properties_committed)
@@ -638,11 +641,11 @@ class MainWindow(QMainWindow):
         self.update_action_states()
 
     def _on_request_focus_shape_text(self, shape_id: str):
-        """Aktivoi Muodot & Palikat -paneelin ja vie fokuksen tekstikenttään."""
+        """Aktivoi Muodot & Palikat -paneelin säilyttäen fokuksen kankaan tekstilaatikossa."""
         self.shape_dock.show()
         self.shape_dock.raise_()
-        self.shape_widget.txt_shape_text.setFocus()
-        self.shape_widget.txt_shape_text.selectAll()
+        if hasattr(self.canvas, "inline_shape_editor") and self.canvas.inline_shape_editor.isVisible():
+            self.canvas.inline_shape_editor.setFocus()
 
     def _on_shape_selected(self, shape_data: Dict[str, Any]):
         """Kutsutaan kun muoto valitaan kankaalla."""

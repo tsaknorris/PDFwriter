@@ -13,6 +13,7 @@ os.environ["QT_NO_NETWORK"] = "1"
 import fitz
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QTextCursor
 
 from pdf_engine.pdf_document import PDFDocumentModel
 from pdf_engine.validator import GauntletValidator
@@ -219,6 +220,58 @@ class TestShapesAndMargins(unittest.TestCase):
         dlg = MarginsDialog(window.doc_model, 0, window)
         self.assertIsNotNone(dlg)
         dlg.close()
+
+        window.close()
+
+    def test_shape_mixed_typography_and_system_fonts(self):
+        """Varmistaa että järjestelmäfontit latautuvat ja tekstilaatikossa voidaan muotoilla yksittäisiä kirjaimia (kuten 'LL')."""
+        window = MainWindow()
+        window.open_file(self.doc_path)
+
+        # 1. Tarkistetaan että fonttilistassa on kaikki järjestelmäfontit eikä vain muutama
+        font_count = window.shape_widget.combo_font_family.count()
+        self.assertGreater(font_count, 50, f"Fonttilistassa tulisi olla järjestelmäfontit, nyt vain {font_count}")
+
+        # 2. Luodaan tekstilaatikko ja aloitetaan inline-muokkaus
+        sid = window.doc_model.draw_shape(
+            0, "textbox", (50, 100, 300, 200),
+            text="HELLOU\nMAAILMA",
+            font_family="DejaVu Sans",
+            font_size=14.0
+        )
+        window.canvas.select_shape(sid)
+        window.canvas.start_inline_shape_editor(sid)
+
+        # Varmistetaan että active_editing_shape_id on asetettu eikä haamutekstiä piirretä
+        self.assertEqual(window.doc_model.active_editing_shape_id, sid)
+
+        # 3. Valitaan 'LL' sanasta 'HELLOU' (indeksit 2..4)
+        editor = window.canvas.inline_shape_editor
+        cursor = editor.textCursor()
+        cursor.setPosition(2)
+        cursor.setPosition(4, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        self.assertEqual(editor.textCursor().selectedText(), "LL")
+
+        # 4. Muotoillaan sivupaneelista vain valinta: Arial, 28pt, Bold, Punainen
+        window.shape_widget.combo_font_family.setCurrentText("Arial")
+        window.shape_widget.spin_font_size.setValue(28.0)
+        window.shape_widget.btn_text_bold.setChecked(True)
+        window.shape_widget.set_text_color((1.0, 0.0, 0.0))
+
+        html = editor.toHtml()
+        self.assertIn("Arial", html)
+        self.assertIn("HE", html)
+        self.assertIn("OU", html)
+        self.assertIn("MAAILMA", html)
+
+        # 5. Suljetaan editori ja varmistetaan että muodon päivitys tallentuu dokumenttimalliin
+        window.canvas.finish_inline_shape_editor(commit=True)
+        self.assertIsNone(window.doc_model.active_editing_shape_id)
+
+        updated_shape = window.doc_model.get_shape(0, sid)
+        self.assertIn("Arial", updated_shape.get("html", ""))
+        self.assertIn("HELLOU", updated_shape.get("text", ""))
 
         window.close()
 

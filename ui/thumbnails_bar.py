@@ -55,7 +55,7 @@ class ThumbnailsListWidget(QListWidget):
                 self.redo_requested.emit()
                 event.accept()
                 return
-        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        if event.key() == Qt.Key.Key_Delete:
             self.delete_requested.emit()
             event.accept()
             return
@@ -326,11 +326,8 @@ class ThumbnailsBar(QWidget):
         if not self.doc_model or not self.doc_model.is_open or not pages:
             return
         total = self.doc_model.page_count
-        if len(pages) >= total:
-            QMessageBox.warning(
-                self, "Toiminto estetty",
-                "Et voi poistaa dokumentin kaikkia sivuja. Ainakin yhden sivun on jäätävä jäljelle."
-            )
+        if total <= 1 or len(pages) >= total:
+            # Dokumentissa täytyy olla vähintään 1 sivu (PDF-standardi). Ei avata häiritseviä ponnahdusikkunoita.
             return
 
         formatted = format_page_range_string(pages)
